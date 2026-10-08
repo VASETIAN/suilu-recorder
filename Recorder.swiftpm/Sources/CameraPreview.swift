@@ -203,7 +203,7 @@ final class CapturePreviewView: UIView, UIGestureRecognizerDelegate {
         onLockFocus?()
     }
 
-    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         guard gesturesEnabled else { return false }
         if let pan = gestureRecognizer as? UIPanGestureRecognizer {
             let velocity = pan.velocity(in: self)
