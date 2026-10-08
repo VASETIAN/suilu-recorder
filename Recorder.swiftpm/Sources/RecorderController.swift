@@ -1,0 +1,1062 @@
+import AVFoundation
+import Photos
+import SwiftUI
+import UIKit
+
+// This reference crosses queue boundaries, but its mutable state stays confined:
+// UI-facing calls / Published state use the main queue; capture state uses
+// captureQueue. Values are copied before publishing from captureQueue to main.
+// Sendability is checked manually because DispatchQueue confinement cannot be
+// expressed by Swift's actor annotations without moving the capture engine.
+final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputRecordingDelegate, @unchecked Sendable {
+    let session = AVCaptureSession()
+    @Published private(set) var settings = RecorderSettings.load()
+    @Published private(set) var phase: RecordingPhase = .idle
+    @Published private(set) var isReady = false
+    @Published private(set) var isConfiguring = false
+    @Published private(set) var supportedModes: [VideoMode] = []
+    @Published private(set) var zoom: CGFloat = 1
+    @Published private(set) var zoomStops: [CGFloat] = [1]
+    @Published private(set) var minimumZoom: CGFloat = 1
+    @Published private(set) var maximumZoom: CGFloat = 1
+    @Published private(set) var hasTorch = false
+    @Published private(set) var torchOn = false
+    @Published private(set) var elapsed: TimeInterval = 0
+    @Published private(set) var availableSpace: Int64?
+    @Published private(set) var libraryItems: [MediaItem] = []
+    @Published private(set) var livePhotoSupported = false
+    @Published private(set) var multitaskingCameraSupported = false
+    @Published private(set) var status = "正在准备相机…"
+    @Published var message: RecorderMessage?
+    // Main-queue callback owned by the visible PiP presentation.
+    var onStopPictureInPicture: (() -> Void)?
+
+    // All capture state and AVFoundation mutations belong to this serial queue.
+    // Published UI state is changed only on the main queue.
+    private let captureQueue = DispatchQueue(label: "com.tians.recorder.capture", qos: .userInitiated)
+    private let movieOutput = AVCaptureMovieFileOutput()
+    private let photoOutput = AVCapturePhotoOutput()
+    private var photoCapture: PhotoCaptureProcessor?
+    private var activeItem: MediaItem?
+    private var videoInput: AVCaptureDeviceInput?
+    private var audioInput: AVCaptureDeviceInput?
+    private var captureSettings = RecorderSettings.load()
+    private var capturePhase: RecordingPhase = .idle
+    private var configured = false
+    private var foreground = false
+    private var pictureInPictureState: CameraPiPState = .inactive
+    private var pictureInPictureDeadline: TimeInterval = 0
+    private var stopRequested = false
+    private var activeURL: URL?
+    private var zoomScale: CGFloat = 1
+    private var orientation: AVCaptureVideoOrientation = .portrait
+    private var ticker: DispatchSourceTimer?
+    private var observers: [NSObjectProtocol] = []
+    private var tickCount = 0
+    private var startTaskRunning = false
+    private var mainForeground = true
+    private var permissionGeneration = 0
+    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+
+    override init() {
+        super.init()
+        installObservers()
+        let timer = DispatchSource.makeTimerSource(queue: captureQueue)
+        timer.schedule(deadline: .now() + 1, repeating: 1)
+        timer.setEventHandler { [weak self] in self?.tick() }
+        timer.resume()
+        ticker = timer
+        captureQueue.async {
+            do { try MediaLibrary.recover() }
+            catch { self.report("图库恢复未完成", error.localizedDescription + " 原文件仍保留。") }
+            self.refreshLibraryOnQueue()
+        }
+    }
+
+    deinit {
+        ticker?.cancel()
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+    }
+
+    var canRecord: Bool { mainForeground && isReady && !isConfiguring && phase == .idle }
+    var canConfigure: Bool { phase == .idle && !isConfiguring }
+    var elapsedLabel: String {
+        let seconds = max(0, Int(elapsed))
+        return String(format: "%02d:%02d:%02d", seconds / 3600, (seconds / 60) % 60, seconds % 60)
+    }
+
+    func start() {
+        guard mainForeground, !startTaskRunning, !isConfiguring, phase == .idle else { return }
+        guard Self.hasPurposeString("NSCameraUsageDescription") else {
+            status = "相机权限声明未加载"
+            showMessage("相机权限声明未加载", "这个运行环境没有加载工程中的相机用途说明。请在 Swift Playgrounds 中点击运行；如仍提示此错误，请检查 App 设置中的相机能力。")
+            return
+        }
+        startTaskRunning = true
+        isConfiguring = true
+        let generation = permissionGeneration
+        Task { @MainActor in
+            let cameraGranted = await Self.requestCapturePermission(.video)
+            guard generation == permissionGeneration, mainForeground else {
+                startTaskRunning = false
+                isConfiguring = false
+                if mainForeground { start() }
+                return
+            }
+            guard cameraGranted else {
+                startTaskRunning = false
+                isConfiguring = false
+                isReady = false
+                status = "请在系统设置中允许相机权限"
+                showMessage("需要相机权限", "打开系统设置，允许随录访问相机，然后回到这里重试。")
+                return
+            }
+            var requested = settings
+            if requested.microphoneEnabled && requested.captureMode != .photo {
+                let granted = await Self.requestCapturePermission(.audio)
+                if !granted {
+                    requested.microphoneEnabled = false
+                    showMessage("麦克风未授权", "已切换为无声录像。可在系统设置中开启麦克风权限，再到录像设置中启用声音。")
+                }
+            }
+            guard generation == permissionGeneration, mainForeground else {
+                startTaskRunning = false
+                isConfiguring = false
+                if mainForeground { start() }
+                return
+            }
+            startTaskRunning = false
+            configure(requested)
+        }
+    }
+
+    func sceneChanged(_ scenePhase: ScenePhase) {
+        if scenePhase == .active {
+            mainForeground = true
+            captureQueue.async {
+                self.foreground = true
+                // The UI phase can lag behind an already completed file callback.
+                // Reconcile on the queue that owns capture state as well.
+                if self.capturePhase == .recording && self.session.isRunning && !self.session.isInterrupted {
+                    self.publish { self.isReady = true; self.status = "录像中" }
+                } else { self.resumeSessionOnQueue() }
+            }
+            if phase == .idle { start() }
+        } else if scenePhase == .background {
+            mainForeground = false
+            isReady = false
+            permissionGeneration += 1
+            if phase.blocksConfiguration { beginFinishingTask() }
+            captureQueue.async {
+                self.foreground = false
+                if self.canContinueInPictureInPicture {
+                    if self.pictureInPictureState == .active { self.endFinishingTask() }
+                    self.publish { self.status = "画中画录像中" }
+                    return
+                }
+                self.turnTorchOff()
+                if self.capturePhase == .preparing || self.capturePhase == .recording {
+                    self.stopOnQueue(reason: "离开前台，已停止录像")
+                }
+                if self.session.isRunning { self.session.stopRunning() }
+                self.publish { self.isReady = false }
+            }
+        }
+        // .inactive also occurs for permission prompts. The capture interruption
+        // notification handles a system interruption without canceling these prompts.
+    }
+
+    func setPictureInPictureState(_ value: CameraPiPState) {
+        if value == .inactive && !mainForeground && phase.blocksConfiguration { beginFinishingTask() }
+        captureQueue.async {
+            self.pictureInPictureState = value
+            self.pictureInPictureDeadline = value == .starting ? ProcessInfo.processInfo.systemUptime + 5 : 0
+            // Only a real, already running video capture may continue in PiP.
+            if value != .inactive && !self.canContinueInPictureInPicture {
+                self.pictureInPictureState = .inactive
+                self.publish { self.onStopPictureInPicture?() }
+            }
+            if value == .active && !self.foreground && self.canContinueInPictureInPicture {
+                self.endFinishingTask()
+            }
+            if !self.foreground && !self.canContinueInPictureInPicture {
+                self.stopOnQueue(reason: "画中画已结束，正在保存…")
+                if self.session.isRunning { self.session.stopRunning() }
+                self.publish { self.isReady = false }
+            }
+        }
+    }
+
+    private var canContinueInPictureInPicture: Bool {
+        let presenting = pictureInPictureState == .active
+            || (pictureInPictureState == .starting && ProcessInfo.processInfo.systemUptime <= pictureInPictureDeadline)
+        return presenting && capturePhase == .recording && configured
+            && session.isMultitaskingCameraAccessSupported && session.isMultitaskingCameraAccessEnabled
+            && session.isRunning && !session.isInterrupted
+    }
+
+    func apply(_ value: RecorderSettings) {
+        guard canConfigure else { return }
+        isConfiguring = true
+        Task { @MainActor in
+            var requested = value
+            if requested.microphoneEnabled && requested.captureMode != .photo {
+                let granted = await Self.requestCapturePermission(.audio)
+                if !granted {
+                    requested.microphoneEnabled = false
+                    showMessage("麦克风未授权", "声音未开启。请先在系统设置中允许麦克风权限。")
+                }
+            }
+            guard mainForeground else { isConfiguring = false; return }
+            configure(requested)
+        }
+    }
+
+    func switchCamera() {
+        var value = settings
+        value.frontCamera.toggle()
+        apply(value)
+    }
+
+    private func configure(_ requested: RecorderSettings) {
+        captureQueue.async {
+            guard self.capturePhase == .idle, self.foreground else {
+                self.publish { self.isConfiguring = false }
+                return
+            }
+            do {
+                let applied = try self.configureOnQueue(requested)
+                if !self.session.isRunning { self.session.startRunning() }
+                let running = self.session.isRunning && !self.session.isInterrupted
+                self.publish {
+                    self.settings = applied
+                    applied.save()
+                    self.isConfiguring = false
+                    self.isReady = running
+                    self.status = running ? (applied.captureMode == .video ? "准备录像" : "准备拍照") : "相机暂不可用，点击重试"
+                }
+                self.publishCapabilities()
+            } catch {
+                let ready = self.configured && self.session.isRunning && !self.session.isInterrupted
+                self.publish {
+                    self.isConfiguring = false
+                    self.isReady = ready
+                    self.showMessage("相机配置失败", error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private func configureOnQueue(_ requested: RecorderSettings) throws -> RecorderSettings {
+        guard Self.hasPurposeString("NSCameraUsageDescription"),
+              AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
+            throw RecorderError("相机权限未准备好，请允许相机权限后重试。")
+        }
+        guard let device = Self.camera(front: requested.frontCamera) else { throw RecorderError("没有可用摄像头。") }
+        var applied = requested
+        if applied.captureMode != .video {
+            applied.captureMode = applied.livePhotoEnabled ? .livePhoto : .photo
+        }
+        let modes = Self.modes(for: device)
+        let chosen = Self.closestMode(to: requested.mode, in: modes)
+        let format = Self.format(for: chosen, device: device)
+        if requested.captureMode == .video {
+            guard format != nil else { throw RecorderError("当前镜头没有支持的录像格式。") }
+            applied.quality = chosen.quality
+            applied.fps = chosen.fps
+        }
+        let input: AVCaptureDeviceInput
+        if let current = videoInput, current.device.uniqueID == device.uniqueID { input = current }
+        else { input = try AVCaptureDeviceInput(device: device) }
+        let oldVideo = videoInput
+        let oldAudio = audioInput
+        let oldSettings = captureSettings
+        let oldOutputs = session.outputs
+        let oldPreset = session.sessionPreset
+        let oldLiveEnabled = photoOutput.isLivePhotoCaptureEnabled
+        let oldFormat = device.activeFormat
+        let oldMinimum = device.activeVideoMinFrameDuration
+        let oldMaximum = device.activeVideoMaxFrameDuration
+        let oldZoom = device.videoZoomFactor
+        let newAudio: AVCaptureDeviceInput?
+        if applied.microphoneEnabled && applied.captureMode != .photo {
+            guard Self.hasPurposeString("NSMicrophoneUsageDescription"),
+                  AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+                  let microphone = AVCaptureDevice.default(for: .audio) else { throw RecorderError("麦克风不可用，可关闭声音后重试。") }
+            newAudio = try oldAudio ?? AVCaptureDeviceInput(device: microphone)
+        } else { newAudio = nil }
+
+        session.beginConfiguration()
+        defer { session.commitConfiguration() }
+        // Public iPad multitasking support only; no background/VoIP entitlement.
+        let multitasking = session.isMultitaskingCameraAccessSupported
+        if multitasking { session.isMultitaskingCameraAccessEnabled = true }
+        publish { self.multitaskingCameraSupported = multitasking }
+        do {
+            if oldVideo !== input {
+                turnTorchOff()
+                if let old = oldVideo { session.removeInput(old) }
+                guard session.canAddInput(input) else { throw RecorderError("无法启用摄像头。") }
+                session.addInput(input)
+            }
+            if oldAudio !== newAudio {
+                if let old = oldAudio { session.removeInput(old) }
+                if let audio = newAudio {
+                    guard session.canAddInput(audio) else { throw RecorderError("无法启用麦克风。") }
+                    session.addInput(audio)
+                }
+            }
+            // Movie file output disables Live Photo. Keep the outputs exclusive.
+            if applied.captureMode == .video {
+                if session.outputs.contains(where: { $0 === photoOutput }) { session.removeOutput(photoOutput) }
+                if !session.outputs.contains(where: { $0 === movieOutput }) {
+                    guard session.canAddOutput(movieOutput) else { throw RecorderError("无法启用录像输出。") }
+                    session.addOutput(movieOutput)
+                }
+            } else {
+                if session.outputs.contains(where: { $0 === movieOutput }) { session.removeOutput(movieOutput) }
+                if session.canSetSessionPreset(.photo) { session.sessionPreset = .photo }
+                if !session.outputs.contains(where: { $0 === photoOutput }) {
+                    guard session.canAddOutput(photoOutput) else { throw RecorderError("无法启用照片输出。") }
+                    session.addOutput(photoOutput)
+                }
+                photoOutput.maxPhotoQualityPrioritization = .quality
+                photoOutput.isHighResolutionCaptureEnabled = true
+                if applied.captureMode == .livePhoto && !photoOutput.isLivePhotoCaptureSupported {
+                    applied.captureMode = .photo
+                    applied.livePhotoEnabled = false
+                    publish { self.showMessage("当前镜头不支持 Live Photo", "已切换普通拍照。可尝试切换前后摄像头。") }
+                }
+                photoOutput.isLivePhotoCaptureEnabled = photoOutput.isLivePhotoCaptureSupported && applied.captureMode == .livePhoto
+            }
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+            if applied.captureMode == .video, let format = format {
+                // activeFormat selects inputPriority automatically on iOS.
+                device.activeFormat = format
+                let duration = CMTime(value: 1, timescale: CMTimeScale(chosen.fps))
+                device.activeVideoMinFrameDuration = duration
+                device.activeVideoMaxFrameDuration = duration
+            }
+            if device.isFocusModeSupported(.continuousAutoFocus) { device.focusMode = .continuousAutoFocus }
+            if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
+            device.isSubjectAreaChangeMonitoringEnabled = true
+            if device.hasTorch && device.isTorchModeSupported(.off) { device.torchMode = .off }
+            videoInput = input
+            audioInput = newAudio
+            zoomScale = Self.displayZoomScale(device)
+            let limits = zoomLimits(device)
+            device.videoZoomFactor = min(max(oldVideo === input ? oldZoom : zoomScale, limits.lowerBound), limits.upperBound)
+            captureSettings = applied
+            if applied.captureMode == .video {
+                movieOutput.minFreeDiskSpaceLimit = applied.reserveBytes
+                movieOutput.movieFragmentInterval = CMTime(seconds: 5, preferredTimescale: 600)
+                if let connection = movieOutput.connection(with: .video) {
+                    if connection.isVideoStabilizationSupported { connection.preferredVideoStabilizationMode = .standard }
+                    if connection.isVideoMirroringSupported {
+                        connection.automaticallyAdjustsVideoMirroring = false
+                        connection.isVideoMirrored = false
+                    }
+                }
+            }
+            configured = true
+            if applied.captureMode == .video && chosen != requested.mode {
+                publish { self.showMessage("已调整录像格式", "已选用当前镜头支持的 \(chosen.title)。") }
+            }
+            return applied
+        } catch {
+            for output in session.outputs { session.removeOutput(output) }
+            if input !== oldVideo { session.removeInput(input) }
+            if let old = oldVideo, !session.inputs.contains(where: { $0 === old }), session.canAddInput(old) { session.addInput(old) }
+            if let audio = newAudio, audio !== oldAudio { session.removeInput(audio) }
+            if let old = oldAudio, !session.inputs.contains(where: { $0 === old }), session.canAddInput(old) { session.addInput(old) }
+            if oldPreset != .inputPriority, session.canSetSessionPreset(oldPreset) { session.sessionPreset = oldPreset }
+            for output in oldOutputs where session.canAddOutput(output) { session.addOutput(output) }
+            if let _ = try? device.lockForConfiguration() {
+                device.activeFormat = oldFormat
+                device.activeVideoMinFrameDuration = oldMinimum
+                device.activeVideoMaxFrameDuration = oldMaximum
+                device.videoZoomFactor = oldZoom
+                device.unlockForConfiguration()
+            }
+            videoInput = oldVideo
+            audioInput = oldAudio
+            captureSettings = oldSettings
+            if session.outputs.contains(where: { $0 === photoOutput }) {
+                photoOutput.isLivePhotoCaptureEnabled = photoOutput.isLivePhotoCaptureSupported && oldLiveEnabled
+            }
+            throw error
+        }
+    }
+
+    static func camera(front: Bool) -> AVCaptureDevice? {
+        let position: AVCaptureDevice.Position = front ? .front : .back
+        let types: [AVCaptureDevice.DeviceType] = front
+            ? [.builtInWideAngleCamera, .builtInTrueDepthCamera]
+            : [.builtInTripleCamera, .builtInDualWideCamera, .builtInDualCamera, .builtInWideAngleCamera]
+        let devices = AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .video,
+                                                        position: position).devices
+        // Prefer a virtual multi-lens camera so pinch zoom can cross the 0.5x / 1x
+        // boundary during a single recording when the device supports it.
+        for type in types {
+            if let device = devices.first(where: { $0.deviceType == type }) { return device }
+        }
+        return nil
+    }
+
+    static func modes(for device: AVCaptureDevice) -> [VideoMode] {
+        VideoQuality.allCases.flatMap { quality in
+            [24, 30, 60].compactMap { fps in
+                let mode = VideoMode(quality: quality, fps: fps)
+                return format(for: mode, device: device) == nil ? nil : mode
+            }
+        }
+    }
+
+    static func format(for mode: VideoMode, device: AVCaptureDevice) -> AVCaptureDevice.Format? {
+        device.formats.filter { format in
+            let size = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            return size.width == mode.quality.width && size.height == mode.quality.height
+                && format.videoSupportedFrameRateRanges.contains {
+                    $0.minFrameRate <= Double(mode.fps) && $0.maxFrameRate >= Double(mode.fps)
+                }
+        }.min { left, right in
+            let lhs = left.videoSupportedFrameRateRanges.map { $0.maxFrameRate }.max() ?? 0
+            let rhs = right.videoSupportedFrameRateRanges.map { $0.maxFrameRate }.max() ?? 0
+            return lhs < rhs
+        }
+    }
+
+    static func closestMode(to requested: VideoMode, in modes: [VideoMode]) -> VideoMode {
+        if modes.contains(requested) { return requested }
+        if let sameQuality = modes.filter({ $0.quality == requested.quality }).min(by: {
+            abs($0.fps - requested.fps) < abs($1.fps - requested.fps)
+        }) { return sameQuality }
+        return modes.min {
+            abs(Int($0.quality.width - requested.quality.width)) * 100 + abs($0.fps - requested.fps)
+                < abs(Int($1.quality.width - requested.quality.width)) * 100 + abs($1.fps - requested.fps)
+        } ?? requested
+    }
+
+    private static func displayZoomScale(_ device: AVCaptureDevice) -> CGFloat {
+        if device.constituentDevices.contains(where: { $0.deviceType == .builtInUltraWideCamera }),
+           let firstSwitch = device.virtualDeviceSwitchOverVideoZoomFactors.first {
+            return CGFloat(truncating: firstSwitch)
+        }
+        return 1
+    }
+
+    private func zoomLimits(_ device: AVCaptureDevice) -> ClosedRange<CGFloat> {
+        let low = device.minAvailableVideoZoomFactor
+        let high = max(low, min(device.maxAvailableVideoZoomFactor,
+                                device.activeFormat.videoMaxZoomFactor, zoomScale * 10))
+        return low...high
+    }
+
+    private func publishCapabilities() {
+        guard let device = videoInput?.device else { return }
+        let modes = Self.modes(for: device)
+        let limits = zoomLimits(device)
+        let low = limits.lowerBound / zoomScale
+        let high = limits.upperBound / zoomScale
+        let current = device.videoZoomFactor / zoomScale
+        let stops: [CGFloat] = [0.5, 1, 2].filter { $0 >= low - 0.01 && $0 <= high + 0.01 }
+        let torchAvailable = device.hasTorch && device.isTorchAvailable
+        let on = device.torchMode == .on
+        let supportsLive = self.captureSettings.captureMode != .video && self.photoOutput.isLivePhotoCaptureSupported
+        publish {
+            self.supportedModes = modes
+            self.minimumZoom = low
+            self.maximumZoom = high
+            self.zoom = current
+            self.zoomStops = stops
+            self.hasTorch = torchAvailable
+            self.torchOn = on
+            self.livePhotoSupported = supportsLive
+        }
+    }
+
+    func setZoom(_ displayedZoom: CGFloat) {
+        captureQueue.async {
+            guard let device = self.videoInput?.device,
+                  self.configured, self.foreground else { return }
+            do {
+                try device.lockForConfiguration()
+                let limits = self.zoomLimits(device)
+                device.videoZoomFactor = min(max(displayedZoom * self.zoomScale,
+                                                 limits.lowerBound), limits.upperBound)
+                device.unlockForConfiguration()
+                self.publishCapabilities()
+            } catch { self.report("变焦失败", error.localizedDescription) }
+        }
+    }
+
+    func focus(at point: CGPoint) {
+        captureQueue.async {
+            guard let device = self.videoInput?.device, self.configured, self.foreground else { return }
+            do {
+                try device.lockForConfiguration()
+                defer { device.unlockForConfiguration() }
+                if device.isFocusPointOfInterestSupported && device.isFocusModeSupported(.autoFocus) {
+                    device.focusPointOfInterest = point
+                    device.focusMode = .autoFocus
+                }
+                if device.isExposurePointOfInterestSupported && device.isExposureModeSupported(.continuousAutoExposure) {
+                    device.exposurePointOfInterest = point
+                    device.exposureMode = .continuousAutoExposure
+                }
+            } catch { self.report("对焦失败", error.localizedDescription) }
+        }
+    }
+
+    func toggleTorch() {
+        captureQueue.async {
+            guard let device = self.videoInput?.device, self.foreground,
+                  device.hasTorch, device.isTorchAvailable else { return }
+            do {
+                try device.lockForConfiguration()
+                defer { device.unlockForConfiguration() }
+                if device.torchMode == .on { device.torchMode = .off }
+                else { try device.setTorchModeOn(level: min(0.5, AVCaptureDevice.maxAvailableTorchLevel)) }
+                self.publishCapabilities()
+            } catch { self.report("补光灯不可用", error.localizedDescription) }
+        }
+    }
+
+    private func turnTorchOff() {
+        guard let device = videoInput?.device, device.hasTorch else { return }
+        do {
+            try device.lockForConfiguration()
+            device.torchMode = .off
+            device.unlockForConfiguration()
+        } catch { /* The camera may already be unavailable during an interruption. */ }
+        publish { self.torchOn = false }
+    }
+
+    func updateOrientation(_ interface: UIInterfaceOrientation) {
+        let value: AVCaptureVideoOrientation
+        switch interface {
+        case .landscapeLeft: value = .landscapeLeft
+        case .landscapeRight: value = .landscapeRight
+        case .portraitUpsideDown: value = .portraitUpsideDown
+        default: value = .portrait
+        }
+        captureQueue.async { self.orientation = value }
+    }
+
+    func startRecording(location: CaptureLocation? = nil) {
+        guard canRecord, settings.captureMode == .video else { return }
+        phase = .preparing
+        status = "正在开始录像…"
+        captureQueue.async { self.startRecordingOnQueue(location: location) }
+    }
+
+    private func startRecordingOnQueue(location: CaptureLocation?) {
+        guard foreground, configured, session.isRunning, !session.isInterrupted,
+              capturePhase == .idle else {
+            setPhase(.idle)
+            report("暂时无法录像", "请确认 App 在前台，并等待相机恢复。")
+            return
+        }
+        guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
+            setPhase(.idle)
+            report("相机权限已关闭", "请在系统设置中允许相机权限。")
+            return
+        }
+        guard !captureSettings.microphoneEnabled || AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
+            setPhase(.idle)
+            report("麦克风权限已关闭", "请允许麦克风权限，或在录像设置中关闭声音。")
+            return
+        }
+        guard let space = RecorderFiles.availableBytes() else {
+            setPhase(.idle)
+            report("无法读取存储空间", "为避免录制失败，本次没有开始录像。稍后重试。")
+            return
+        }
+        guard space > captureSettings.reserveBytes + 256 * 1_048_576 else {
+            setPhase(.idle)
+            report("存储空间不足", "剩余 \(RecorderFiles.sizeLabel(space))。开始录像需要超过保留空间加 256 MB，请先释放空间。")
+            return
+        }
+        do {
+            let item = self.newItem(kind: .video, location: location)
+            let folder = try MediaLibrary.begin(item)
+            let url = folder.appendingPathComponent("video.mov")
+            movieOutput.metadata = location?.movieMetadata ?? []
+            activeItem = item
+            guard let connection = movieOutput.connection(with: .video), connection.isActive else {
+                throw RecorderError("摄像头输出暂未就绪，请稍后重试。")
+            }
+            if connection.isVideoOrientationSupported { connection.videoOrientation = orientation }
+            if connection.isVideoMirroringSupported {
+                connection.automaticallyAdjustsVideoMirroring = false
+                connection.isVideoMirrored = false
+            }
+            movieOutput.minFreeDiskSpaceLimit = captureSettings.reserveBytes
+            activeURL = url
+            stopRequested = false
+            setPhase(.preparing)
+            publish { self.elapsed = 0; self.status = "正在开始录像…" }
+            movieOutput.startRecording(to: url, recordingDelegate: self)
+        } catch {
+            activeURL = nil
+            activeItem = nil
+            setPhase(.idle)
+            report("开始录像失败", error.localizedDescription)
+        }
+    }
+
+    func stopRecording() {
+        guard phase == .recording || phase == .preparing else { return }
+        beginFinishingTask()
+        captureQueue.async { self.stopOnQueue(reason: "正在完成录像…") }
+    }
+
+    private func stopOnQueue(reason: String) {
+        guard capturePhase == .recording || capturePhase == .preparing else { return }
+        stopRequested = true
+        setPhase(.finishing)
+        publish { self.status = reason }
+        if movieOutput.isRecording { movieOutput.stopRecording() }
+    }
+
+    func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL,
+                    from connections: [AVCaptureConnection]) {
+        captureQueue.async {
+            if self.stopRequested || !self.foreground {
+                self.setPhase(.finishing)
+                if self.movieOutput.isRecording { self.movieOutput.stopRecording() }
+            } else {
+                self.setPhase(.recording)
+                self.publish { self.status = "录像中" }
+            }
+        }
+    }
+
+    func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL,
+                    from connections: [AVCaptureConnection], error: Error?) {
+        let detail = error?.localizedDescription
+        let nsError = error as NSError?
+        let finished = error == nil || (nsError?.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool == true)
+        captureQueue.async {
+            let item = self.activeItem
+            self.activeItem = nil
+            self.activeURL = nil
+            self.stopRequested = false
+            self.turnTorchOff()
+            if var value = item {
+                let seconds = CMTimeGetSeconds(AVURLAsset(url: outputFileURL).duration)
+                value.duration = seconds.isFinite ? max(0, seconds) : nil
+                value.recovered = !finished
+                self.completeCaptureOnQueue(value)
+            } else { self.finishCaptureStateOnQueue() }
+            if let detail = detail {
+                self.report(finished ? "录像已自动停止" : "录像异常结束",
+                            detail + " 拍摄文件已保留，可在图库查看或导出。")
+            }
+        }
+    }
+
+    func setCaptureMode(_ mode: CaptureMode) {
+        guard canConfigure else { return }
+        var value = settings
+        value.captureMode = mode == .video ? .video : value.livePhotoEnabled ? .livePhoto : .photo
+        apply(value)
+    }
+
+    func toggleLivePhoto() {
+        guard canConfigure, isReady, settings.captureMode != .video, livePhotoSupported else { return }
+        var value = settings
+        value.livePhotoEnabled.toggle()
+        value.captureMode = value.livePhotoEnabled ? .livePhoto : .photo
+        apply(value)
+    }
+
+    private func newItem(kind: CaptureMode, location: CaptureLocation?) -> MediaItem {
+        MediaItem(id: UUID(), kind: kind, createdAt: Date(),
+                  camera: captureSettings.frontCamera ? "前置摄像头" : "后置摄像头",
+                  resolution: kind == .video ? "\(captureSettings.quality.width) × \(captureSettings.quality.height)" : "待处理",
+                  fps: kind == .video ? captureSettings.fps : nil,
+                  hasAudio: captureSettings.microphoneEnabled && kind != .photo, location: location)
+    }
+
+    func takePhoto(location: CaptureLocation? = nil) {
+        guard canRecord, settings.captureMode != .video else { return }
+        phase = .photographing
+        status = "正在拍摄…"
+        captureQueue.async {
+            guard self.foreground, self.configured, self.capturePhase == .idle,
+                  self.session.isRunning, !self.session.isInterrupted,
+                  AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
+                self.finishCaptureStateOnQueue()
+                self.report("暂时无法拍照", "请等待相机恢复后重试。")
+                return
+            }
+            guard let free = RecorderFiles.availableBytes(), free > self.captureSettings.reserveBytes + 64 * 1_048_576 else {
+                self.finishCaptureStateOnQueue()
+                self.report("存储空间不足", "拍照需要超过保留空间加 64 MB。")
+                return
+            }
+            do {
+                let live = self.captureSettings.captureMode == .livePhoto
+                guard self.photoOutput.availablePhotoCodecTypes.contains(.jpeg) else { throw RecorderError("当前镜头不支持 JPEG 照片输出。") }
+                if live && !self.photoOutput.isLivePhotoCaptureEnabled { throw RecorderError("当前镜头未准备好 Live Photo。") }
+                let item = self.newItem(kind: live ? .livePhoto : .photo, location: location)
+                let folder = try MediaLibrary.begin(item)
+                let options = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
+                options.photoQualityPrioritization = .quality
+                options.isHighResolutionPhotoEnabled = true
+                if let location = location { options.metadata = location.gpsMetadata }
+                if live {
+                    options.livePhotoMovieFileURL = folder.appendingPathComponent("live.mov")
+                    options.livePhotoMovieMetadata = location?.movieMetadata ?? []
+                }
+                if let connection = self.photoOutput.connection(with: .video) {
+                    if connection.isVideoOrientationSupported { connection.videoOrientation = self.orientation }
+                    if connection.isVideoMirroringSupported {
+                        connection.automaticallyAdjustsVideoMirroring = false
+                        connection.isVideoMirrored = false
+                    }
+                }
+                self.activeItem = item
+                self.setPhase(.photographing)
+                let processor = PhotoCaptureProcessor(queue: self.captureQueue) { data, resolution, liveSucceeded, detail in
+                    self.photoCapture = nil
+                    self.activeItem = nil
+                    guard let data = data else {
+                        self.finishCaptureStateOnQueue()
+                        self.report("拍照失败", detail ?? "系统未返回完整照片，请重试。")
+                        return
+                    }
+                    do {
+                        var completed = item
+                        completed.resolution = resolution
+                        if live && !liveSucceeded { completed.kind = .photo }
+                        try data.write(to: folder.appendingPathComponent("photo.jpg"), options: .atomic)
+                        self.completeCaptureOnQueue(completed)
+                        if live && !liveSucceeded {
+                            self.report("动态片段未完成", "普通照片已保存到内置图库。" + (detail ?? ""))
+                        } else if let detail = detail { self.report("拍摄提示", detail) }
+                    } catch {
+                        self.finishCaptureStateOnQueue()
+                        self.report("照片保存未完成", error.localizedDescription + " 暂存内容仍保留。")
+                    }
+                }
+                self.photoCapture = processor
+                self.photoOutput.capturePhoto(with: options, delegate: processor)
+            } catch {
+                self.activeItem = nil
+                self.finishCaptureStateOnQueue()
+                self.report("拍照失败", error.localizedDescription)
+            }
+        }
+    }
+
+    private func completeCaptureOnQueue(_ item: MediaItem) {
+        setPhase(.saving)
+        do {
+            try MediaLibrary.finish(item)
+            self.createThumbnailOnQueue(item)
+            publish { self.status = "\(item.kind.title)已保存到内置图库" }
+        } catch { report("保存图库未完成", error.localizedDescription + " 原始暂存内容仍保留。") }
+        refreshLibraryOnQueue()
+        finishCaptureStateOnQueue()
+    }
+
+    private func createThumbnailOnQueue(_ item: MediaItem) {
+        var image: UIImage?
+        if item.kind == .video {
+            let generator = AVAssetImageGenerator(asset: AVURLAsset(url: item.movieURL))
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: 400, height: 400)
+            if let cgImage = try? generator.copyCGImage(at: .zero, actualTime: nil) { image = UIImage(cgImage: cgImage) }
+        } else if let data = try? Data(contentsOf: item.imageURL), let original = UIImage(data: data) {
+            let scale = min(1, 400 / max(original.size.width, original.size.height))
+            let size = CGSize(width: original.size.width * scale, height: original.size.height * scale)
+            image = UIGraphicsImageRenderer(size: size).image { _ in original.draw(in: CGRect(origin: .zero, size: size)) }
+        }
+        if let data = image?.jpegData(compressionQuality: 0.75) { try? data.write(to: item.thumbnailURL, options: .atomic) }
+    }
+
+    private func finishCaptureStateOnQueue() {
+        setPhase(.idle)
+        if !foreground && session.isRunning { session.stopRunning() }
+        resumeSessionOnQueue()
+        let ready = foreground && session.isRunning && !session.isInterrupted
+        publish { self.isReady = ready; self.endFinishingTask() }
+    }
+
+    private func resumeSessionOnQueue() {
+        guard foreground, configured, capturePhase == .idle else { return }
+        if !session.isRunning { session.startRunning() }
+        let ready = session.isRunning && !session.isInterrupted
+        let label = captureSettings.captureMode == .video ? "准备录像" : "准备拍照"
+        publish {
+            self.isReady = ready
+            self.status = ready ? label : "等待相机恢复，可点击重试"
+        }
+    }
+
+    func refreshLibrary() { captureQueue.async { self.refreshLibraryOnQueue() } }
+    private func refreshLibraryOnQueue() {
+        let items = MediaLibrary.items()
+        let space = RecorderFiles.availableBytes()
+        publish { self.libraryItems = items; self.availableSpace = space }
+    }
+
+    func exportToPhotos(_ item: MediaItem) {
+        guard canConfigure else { return }
+        phase = .saving
+        beginFinishingTask()
+        Task { @MainActor in
+            let granted = await Self.requestPhotosPermission()
+            guard granted else {
+                phase = .idle
+                endFinishingTask()
+                showMessage("需要照片添加权限", "请在系统设置中允许添加照片后重试。内置图库中的原件仍保留。")
+                return
+            }
+            captureQueue.async {
+                guard self.capturePhase == .idle else { return }
+                self.setPhase(.saving)
+                guard item.resourceURLs.allSatisfy({ FileManager.default.fileExists(atPath: $0.path) }) else {
+                    self.finishCaptureStateOnQueue()
+                    self.report("原文件不完整", "未进行导出，请检查图库内容。")
+                    return
+                }
+                PHPhotoLibrary.shared().performChanges({
+                    let request = PHAssetCreationRequest.forAsset()
+                    request.creationDate = item.createdAt
+                    request.location = item.location?.clLocation
+                    let options = PHAssetResourceCreationOptions()
+                    // Export is a copy. Keep App library originals on both success and failure.
+                    options.shouldMoveFile = false
+                    switch item.kind {
+                    case .video: request.addResource(with: .video, fileURL: item.movieURL, options: options)
+                    case .photo: request.addResource(with: .photo, fileURL: item.imageURL, options: options)
+                    case .livePhoto:
+                        request.addResource(with: .photo, fileURL: item.imageURL, options: options)
+                        request.addResource(with: .pairedVideo, fileURL: item.movieURL, options: options)
+                    }
+                }) { success, error in
+                    let detail = error?.localizedDescription
+                    self.captureQueue.async {
+                        if success {
+                            do { try MediaLibrary.markExported(item) }
+                            catch { self.report("已导出，标记未更新", "系统照片中已有内容，App 原件保留。" + error.localizedDescription) }
+                            self.report("已导出到系统照片", "拍摄位置和时间已随内容导出，App 内原件仍保留。")
+                        } else { self.report("导出失败", "App 内原件仍保留，可重试。\n" + (detail ?? "系统照片暂不可用")) }
+                        self.refreshLibraryOnQueue()
+                        self.finishCaptureStateOnQueue()
+                    }
+                }
+            }
+        }
+    }
+
+    func deleteMedia(_ item: MediaItem) {
+        guard canConfigure else { return }
+        captureQueue.async {
+            guard self.capturePhase == .idle else { return }
+            do { try MediaLibrary.delete(item) }
+            catch { self.report("删除失败", error.localizedDescription) }
+            self.refreshLibraryOnQueue()
+        }
+    }
+
+    private func tick() {
+        tickCount += 1
+        if !foreground && capturePhase == .recording && !canContinueInPictureInPicture {
+            stopOnQueue(reason: "画中画不可用，正在保存…")
+            if session.isRunning { session.stopRunning() }
+            publish { self.isReady = false }
+        }
+        if capturePhase == .recording {
+            let value = CMTimeGetSeconds(movieOutput.recordedDuration)
+            publish { self.elapsed = value.isFinite ? max(0, value) : 0 }
+        }
+        if tickCount % 3 == 0 || capturePhase == .recording {
+            let free = RecorderFiles.availableBytes()
+            publish { self.availableSpace = free }
+            if capturePhase == .recording {
+                if let free = free, free <= captureSettings.reserveBytes {
+                    stopOnQueue(reason: "空间不足，正在停止并保存…")
+                    report("剩余空间较低", "已自动停止录像，并尝试保存已录制的视频。")
+                } else if free == nil {
+                    stopOnQueue(reason: "无法读取空间，正在停止并保存…")
+                    report("存储空间检测失败", "已停止录像，并尝试保存已录制的视频。")
+                }
+            }
+        }
+    }
+
+    private func installObservers() {
+        let center = NotificationCenter.default
+        // Playgrounds hosts the running app; also follow UIKit lifecycle events
+        // instead of relying exclusively on the hosted SwiftUI scenePhase.
+        observers.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification,
+                                             object: nil, queue: .main) { [weak self] _ in
+            self?.sceneChanged(.background)
+        })
+        observers.append(center.addObserver(forName: UIApplication.didBecomeActiveNotification,
+                                             object: nil, queue: .main) { [weak self] _ in
+            self?.sceneChanged(.active)
+        })
+        observers.append(center.addObserver(forName: UIApplication.protectedDataWillBecomeUnavailableNotification,
+                                             object: nil, queue: .main) { [weak self] _ in
+            guard let self = self else { return }
+            if self.phase.blocksConfiguration { self.beginFinishingTask() }
+            self.captureQueue.async {
+                self.pictureInPictureState = .inactive
+                self.turnTorchOff()
+                self.stopOnQueue(reason: "设备已锁定，正在保存…")
+                if self.session.isRunning { self.session.stopRunning() }
+                self.publish { self.isReady = false; self.onStopPictureInPicture?() }
+            }
+        })
+        observers.append(center.addObserver(forName: .AVCaptureSessionWasInterrupted,
+                                             object: session, queue: .main) { [weak self] notification in
+            guard let self = self else { return }
+            let reason = (notification.userInfo?[AVCaptureSessionInterruptionReasonKey] as? NSNumber)?.intValue
+            let background = reason == AVCaptureSession.InterruptionReason.videoDeviceNotAvailableInBackground.rawValue
+            if self.phase.blocksConfiguration { self.beginFinishingTask() }
+            self.captureQueue.async {
+                // A queued notification can outlive the interruption itself.
+                guard self.session.isInterrupted else { self.resumeSessionOnQueue(); return }
+                self.turnTorchOff()
+                self.stopOnQueue(reason: "相机被系统中断，正在保存…")
+                self.publish { self.isReady = false; self.status = "相机暂被系统占用" }
+                if !background {
+                    self.report("相机已中断", "相机可能被其他 App 占用，或当前窗口模式不支持摄像。回到前台全屏后可重试。")
+                }
+            }
+        })
+        observers.append(center.addObserver(forName: .AVCaptureSessionInterruptionEnded,
+                                             object: session, queue: .main) { [weak self] _ in
+            guard let self = self else { return }
+            self.captureQueue.async { self.resumeSessionOnQueue() }
+        })
+        observers.append(center.addObserver(forName: .AVCaptureSessionDidStartRunning,
+                                             object: session, queue: .main) { [weak self] _ in
+            guard let self = self else { return }
+            self.captureQueue.async {
+                let ready = self.foreground && self.configured && self.session.isRunning && !self.session.isInterrupted
+                self.publish { self.isReady = ready }
+            }
+        })
+        observers.append(center.addObserver(forName: .AVCaptureSessionDidStopRunning,
+                                             object: session, queue: .main) { [weak self] _ in
+            guard let self = self else { return }
+            self.captureQueue.async {
+                if !self.session.isRunning { self.publish { self.isReady = false } }
+            }
+        })
+        observers.append(center.addObserver(forName: .AVCaptureSessionRuntimeError,
+                                             object: session, queue: .main) { [weak self] notification in
+            guard let self = self else { return }
+            let error = notification.userInfo?[AVCaptureSessionErrorKey] as? NSError
+            self.captureQueue.async {
+                self.stopOnQueue(reason: "相机发生错误，正在完成录像…")
+                self.publish { self.isReady = false }
+                if self.capturePhase == .idle && self.foreground,
+                   error?.code == AVError.Code.mediaServicesWereReset.rawValue {
+                    self.session.startRunning()
+                    let ready = self.session.isRunning
+                    self.publish { self.isReady = ready; self.status = ready ? "准备录像" : "相机暂不可用" }
+                } else {
+                    self.report("相机运行错误", error?.localizedDescription ?? "相机暂不可用，请返回前台后重试。")
+                }
+            }
+        })
+        observers.append(center.addObserver(forName: .AVCaptureDeviceSubjectAreaDidChange,
+                                             object: nil, queue: .main) { [weak self] notification in
+            guard let self = self, let changedDevice = notification.object as? AVCaptureDevice else { return }
+            let changedDeviceID = changedDevice.uniqueID
+            self.captureQueue.async {
+                guard let device = self.videoInput?.device, device.uniqueID == changedDeviceID else { return }
+                do {
+                    try device.lockForConfiguration()
+                    if device.isFocusModeSupported(.continuousAutoFocus) { device.focusMode = .continuousAutoFocus }
+                    device.unlockForConfiguration()
+                } catch { /* Autofocus can resume on the next configuration. */ }
+            }
+        })
+    }
+
+    private static func requestCapturePermission(_ media: AVMediaType) async -> Bool {
+        let key = media == .video ? "NSCameraUsageDescription" : "NSMicrophoneUsageDescription"
+        guard hasPurposeString(key) else { return false }
+        switch AVCaptureDevice.authorizationStatus(for: media) {
+        case .authorized: return true
+        case .notDetermined:
+            return await withCheckedContinuation { continuation in
+                AVCaptureDevice.requestAccess(for: media) { continuation.resume(returning: $0) }
+            }
+        default: return false
+        }
+    }
+
+    private static func requestPhotosPermission() async -> Bool {
+        guard hasPurposeString("NSPhotoLibraryAddUsageDescription")
+                || hasPurposeString("NSPhotoLibraryUsageDescription") else { return false }
+        var status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+        if status == .notDetermined {
+            status = await withCheckedContinuation { continuation in
+                PHPhotoLibrary.requestAuthorization(for: .addOnly) { continuation.resume(returning: $0) }
+            }
+        }
+        return status == .authorized || status == .limited
+    }
+
+    private static func hasPurposeString(_ key: String) -> Bool {
+        guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String else { return false }
+        return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func beginFinishingTask() {
+        DispatchQueue.main.async {
+            guard self.backgroundTask == .invalid else { return }
+            // Finish a file/export or bridge the bounded native PiP transition.
+            // Confirmed PiP ends this task and relies on AVKit's own lifecycle.
+            self.backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "FinishRecording") { [weak self] in
+                guard let self = self else { return }
+                self.captureQueue.async {
+                    guard !self.canContinueInPictureInPicture else { return }
+                    if self.movieOutput.isRecording { self.movieOutput.stopRecording() }
+                    if self.session.isRunning { self.session.stopRunning() }
+                }
+                self.endFinishingTask()
+            }
+        }
+    }
+
+    private func endFinishingTask() {
+        DispatchQueue.main.async {
+            guard self.backgroundTask != .invalid else { return }
+            UIApplication.shared.endBackgroundTask(self.backgroundTask)
+            self.backgroundTask = .invalid
+        }
+    }
+
+    private func setPhase(_ value: RecordingPhase) {
+        capturePhase = value
+        publish {
+            self.phase = value
+            // System / low-space stops also need time to finish the movie after
+            // the PiP window closes; route all movie stops through this phase.
+            if value == .finishing { self.beginFinishingTask() }
+            if value != .recording && value != .preparing { self.onStopPictureInPicture?() }
+        }
+    }
+    private func publish(_ action: @escaping @Sendable () -> Void) { DispatchQueue.main.async(execute: action) }
+    private func report(_ title: String, _ detail: String) { publish { self.showMessage(title, detail) } }
+    private func showMessage(_ title: String, _ detail: String) {
+        message = RecorderMessage(title: title, detail: detail)
+    }
+}
+
+private struct RecorderError: LocalizedError {
+    let detail: String
+    init(_ detail: String) { self.detail = detail }
+    var errorDescription: String? { detail }
+}

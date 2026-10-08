@@ -1,0 +1,5 @@
+/build/
+/Recorder.xcodeproj/
+/Config/
+__pycache__/
+.DS_Store

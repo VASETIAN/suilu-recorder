@@ -1,0 +1,46 @@
+name: Build iPhone App
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['Recorder.swiftpm/**', 'tools/**', '.github/workflows/build-ios.yml']
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate native project from App Playground
+        run: python3 tools/generate_project.py
+      - name: Build unsigned iPhoneOS App
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          xcodebuild -version
+          xcodebuild build -project Recorder.xcodeproj -scheme Recorder \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            2>&1 | tee build/xcodebuild.log
+      - name: Package actual arm64 device build
+        run: python3 tools/package_ipa.py
+      - name: Upload unsigned IPA and verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: Recorder-iPhone-unsigned
+          path: build/artifacts/
+          if-no-files-found: error
+          retention-days: 3
+      - name: Upload compiler log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iOS-build-log
+          path: build/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 3
