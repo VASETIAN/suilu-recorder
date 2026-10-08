@@ -1,4 +1,5 @@
 import AVFoundation
+import ImageIO
 import Photos
 import SwiftUI
 import UIKit
@@ -30,12 +31,24 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     @Published private(set) var status = "正在准备相机…"
     @Published private(set) var lastCameraError = UserDefaults.standard.string(forKey: "Recorder.lastCameraError")
     @Published var message: RecorderMessage?
+    @Published private(set) var resumeRequest: UUID?
+    @Published private(set) var focusExposureLocked = false
+    @Published private(set) var exposureBias: Float = 0
+    @Published private(set) var captureLoad: CaptureLoad = .normal
+    @Published private(set) var thumbnailGeneration = 0
+    @Published private(set) var exportingPhotoIDs: Set<UUID> = []
+    @Published private(set) var photosExportStatus = ""
+    @Published private(set) var preparingShare = false
+    @Published var shareExport: MediaExport?
+    private var preparedShare: MediaExport?
+    private var failedPhotosExports = 0
     // Main-queue callback owned by the visible PiP presentation.
     var onStopPictureInPicture: (() -> Void)?
 
     // All capture state and AVFoundation mutations belong to this serial queue.
     // Published UI state is changed only on the main queue.
     private let captureQueue = DispatchQueue(label: "com.tians.recorder.capture", qos: .userInitiated)
+    private let mediaQueue = DispatchQueue(label: "com.tians.recorder.media", qos: .utility)
     private let movieOutput = AVCaptureMovieFileOutput()
     private let photoOutput = AVCapturePhotoOutput()
     private var photoCapture: PhotoCaptureProcessor?
@@ -58,6 +71,12 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     private var startTaskRunning = false
     private var mainForeground = false
     private var runtimeRecoveryAttempted = false
+    private var resumeAfterBackgroundPending = false
+    private var resumeSourceID: UUID?
+    private var loadOnQueue: CaptureLoad = .normal
+    private var pressureObserver: NSKeyValueObservation?
+    private var pendingPhotosExports: [(MediaItem, Bool)] = []
+    private var photosExportRunning = false
     private var permissionGeneration = 0
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
@@ -71,6 +90,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         timer.setEventHandler { [weak self] in self?.tick() }
         timer.resume()
         ticker = timer
+        mediaQueue.async { MediaLibrary.cleanOldShareExports() }
         captureQueue.async {
             do { try MediaLibrary.recover() }
             catch { self.report("图库恢复未完成", error.localizedDescription + " 原文件仍保留。") }
@@ -83,7 +103,10 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         observers.forEach { NotificationCenter.default.removeObserver($0) }
     }
 
-    var canRecord: Bool { mainForeground && isReady && !isConfiguring && phase == .idle }
+    var canRecord: Bool {
+        mainForeground && isReady && !isConfiguring && phase == .idle
+            && (!settings.thermalProtection || captureLoad != .critical)
+    }
     var canConfigure: Bool { phase == .idle && !isConfiguring }
     var elapsedLabel: String {
         let seconds = max(0, Int(elapsed))
@@ -158,13 +181,18 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             captureQueue.async {
                 self.foreground = false
                 if self.canContinueInPictureInPicture {
+                    self.resumeAfterBackgroundPending = false
                     if self.pictureInPictureState == .active { self.endFinishingTask() }
                     self.publish { self.status = "画中画录像中" }
                     return
                 }
+                self.resumeAfterBackgroundPending = self.captureSettings.resumeAfterBackground
+                    && self.captureSettings.captureMode == .video
+                    && (self.capturePhase == .preparing || self.capturePhase == .recording)
+                self.resumeSourceID = self.resumeAfterBackgroundPending ? self.activeItem?.id : nil
                 self.turnTorchOff()
                 if self.capturePhase == .preparing || self.capturePhase == .recording {
-                    self.stopOnQueue(reason: "离开前台，已停止录像")
+                    self.stopOnQueue(reason: "离开前台，已停止录像", preserveResume: true)
                 }
                 if self.session.isRunning { self.session.stopRunning() }
                 self.publish { self.isReady = false }
@@ -215,7 +243,26 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                     showMessage("麦克风未授权", "声音未开启。请先在系统设置中允许麦克风权限。")
                 }
             }
+            if requested.automaticallyExportToPhotos && !settings.automaticallyExportToPhotos {
+                let granted = await Self.requestPhotosPermission()
+                if !granted {
+                    requested.automaticallyExportToPhotos = false
+                    showMessage("未启用自动导出", "系统照片添加权限未获允许，拍摄仍保存到内置图库。")
+                }
+            }
             guard mainForeground else { isConfiguring = false; return }
+            if displayedZoom == nil && requested.hasSameCaptureConfiguration(as: settings) {
+                let value = requested
+                captureQueue.async {
+                    self.resumeAfterBackgroundPending = false
+                    self.captureSettings = value
+                    self.movieOutput.minFreeDiskSpaceLimit = value.reserveBytes
+                    self.readCaptureLoadOnQueue()
+                    self.resumeSessionOnQueue()
+                    self.publish { self.settings = value; value.save(); self.isConfiguring = false }
+                }
+                return
+            }
             configure(requested, displayedZoom: displayedZoom)
         }
     }
@@ -228,6 +275,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
 
     private func configure(_ requested: RecorderSettings, displayedZoom: CGFloat? = nil) {
         captureQueue.async {
+            self.resumeAfterBackgroundPending = false
             guard self.capturePhase == .idle, self.foreground else {
                 self.publish { self.isConfiguring = false }
                 return
@@ -244,6 +292,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                     self.status = running ? (applied.captureMode == .video ? "准备录像" : "准备拍照") : "相机暂不可用，点击重试"
                 }
                 self.publishCapabilities()
+                self.readCaptureLoadOnQueue()
             } catch {
                 let ready = self.configured && self.session.isRunning && !self.session.isInterrupted
                 self.publish {
@@ -410,6 +459,12 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                     }
                 }
             }
+            pressureObserver = device.observe(\.systemPressureState, options: [.initial, .new]) { [weak self] _, _ in
+                guard let self = self else { return }
+                self.captureQueue.async { self.readCaptureLoadOnQueue() }
+            }
+            let bias = device.exposureTargetBias
+            publish { self.focusExposureLocked = false; self.exposureBias = bias }
             configured = true
             if applied.captureMode == .video && chosen != requested.mode {
                 publish { self.showMessage("已调整录像格式", "已选用当前镜头支持的 \(chosen.title)。") }
@@ -634,7 +689,37 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                     device.exposurePointOfInterest = point
                     device.exposureMode = .continuousAutoExposure
                 }
+                device.isSubjectAreaChangeMonitoringEnabled = true
+                self.publish { self.focusExposureLocked = false }
             } catch { self.report("对焦失败", error.localizedDescription) }
+        }
+    }
+
+    func lockFocusAndExposure() {
+        captureQueue.async {
+            guard let device = self.videoInput?.device, self.configured, self.foreground else { return }
+            do {
+                try device.lockForConfiguration()
+                defer { device.unlockForConfiguration() }
+                guard device.isFocusModeSupported(.locked) || device.isExposureModeSupported(.locked) else { return }
+                if device.isFocusModeSupported(.locked) { device.focusMode = .locked }
+                if device.isExposureModeSupported(.locked) { device.exposureMode = .locked }
+                device.isSubjectAreaChangeMonitoringEnabled = false
+                self.publish { self.focusExposureLocked = true }
+            } catch { self.report("无法锁定对焦", error.localizedDescription) }
+        }
+    }
+
+    func setExposureBias(_ requested: Float) {
+        captureQueue.async {
+            guard let device = self.videoInput?.device, self.configured, self.foreground else { return }
+            do {
+                try device.lockForConfiguration()
+                defer { device.unlockForConfiguration() }
+                let value = min(max(requested, device.minExposureTargetBias), device.maxExposureTargetBias)
+                device.setExposureTargetBias(value, completionHandler: nil)
+                self.publish { self.exposureBias = value }
+            } catch { self.report("曝光调节失败", error.localizedDescription) }
         }
     }
 
@@ -673,18 +758,24 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         captureQueue.async { self.orientation = value }
     }
 
-    func startRecording(location: CaptureLocation? = nil) {
+    func startRecording(location: CaptureLocation? = nil, resumedFrom: UUID? = nil) {
         guard canRecord, settings.captureMode == .video else { return }
         phase = .preparing
         status = "正在开始录像…"
-        captureQueue.async { self.startRecordingOnQueue(location: location) }
+        captureQueue.async { self.startRecordingOnQueue(location: location, resumedFrom: resumedFrom) }
     }
 
-    private func startRecordingOnQueue(location: CaptureLocation?) {
+    private func startRecordingOnQueue(location: CaptureLocation?, resumedFrom: UUID?) {
+        resumeAfterBackgroundPending = false
         guard foreground, configured, session.isRunning, !session.isInterrupted,
               capturePhase == .idle else {
             setPhase(.idle)
             report("暂时无法录像", "请确认 App 在前台，并等待相机恢复。")
+            return
+        }
+        guard !captureSettings.thermalProtection || loadOnQueue != .critical else {
+            setPhase(.idle)
+            report("设备需要冷却", "温度或相机负载过高，本次没有开始录像。")
             return
         }
         guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
@@ -708,7 +799,8 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             return
         }
         do {
-            let item = self.newItem(kind: .video, location: location)
+            var item = self.newItem(kind: .video, location: location)
+            item.resumedFromID = resumedFrom
             let folder = try MediaLibrary.begin(item)
             let url = folder.appendingPathComponent("video.mov")
             movieOutput.metadata = location?.movieMetadata ?? []
@@ -741,11 +833,12 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         captureQueue.async { self.stopOnQueue(reason: "正在完成录像…") }
     }
 
-    private func stopOnQueue(reason: String) {
+    private func stopOnQueue(reason: String, preserveResume: Bool = false) {
         guard capturePhase == .recording || capturePhase == .preparing else { return }
+        if !preserveResume { resumeAfterBackgroundPending = false }
         stopRequested = true
         setPhase(.finishing)
-        publish { self.status = reason }
+        publish { self.status = reason; self.captureFeedback(.stopped) }
         if movieOutput.isRecording { movieOutput.stopRecording() }
     }
 
@@ -757,7 +850,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                 if self.movieOutput.isRecording { self.movieOutput.stopRecording() }
             } else {
                 self.setPhase(.recording)
-                self.publish { self.status = "录像中" }
+                self.publish { self.status = "录像中"; self.captureFeedback(.began) }
             }
         }
     }
@@ -768,14 +861,13 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         let nsError = error as NSError?
         let finished = error == nil || (nsError?.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool == true)
         captureQueue.async {
+            if error != nil { self.resumeAfterBackgroundPending = false }
             let item = self.activeItem
             self.activeItem = nil
             self.activeURL = nil
             self.stopRequested = false
             self.turnTorchOff()
             if var value = item {
-                let seconds = CMTimeGetSeconds(AVURLAsset(url: outputFileURL).duration)
-                value.duration = seconds.isFinite ? max(0, seconds) : nil
                 value.recovered = !finished
                 self.completeCaptureOnQueue(value)
             } else { self.finishCaptureStateOnQueue() }
@@ -802,12 +894,18 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     }
 
     private func newItem(kind: CaptureMode, location: CaptureLocation?) -> MediaItem {
-        MediaItem(id: UUID(), kind: kind, createdAt: Date(),
+        var item = MediaItem(id: UUID(), kind: kind, createdAt: Date(),
                   camera: videoInput.map { Self.lensLabel($0.device) } ?? "相机",
                   resolution: kind == .video ? "\(captureSettings.quality.width) × \(captureSettings.quality.height)" : "待处理",
                   fps: kind == .video ? captureSettings.fps : nil,
                   dynamicRange: kind == .video ? captureSettings.dynamicRange.title : nil,
                   hasAudio: captureSettings.microphoneEnabled && kind != .photo, location: location)
+        if let device = videoInput?.device {
+            item.zoomFactor = Double(device.videoZoomFactor / zoomScale)
+            item.exposureBias = device.exposureTargetBias
+            item.focusExposureLocked = device.focusMode == .locked && device.exposureMode == .locked
+        }
+        return item
     }
 
     func takePhoto(location: CaptureLocation? = nil) {
@@ -887,26 +985,48 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         setPhase(.saving)
         do {
             try MediaLibrary.finish(item)
-            self.createThumbnailOnQueue(item)
-            publish { self.status = "\(item.kind.title)已保存到内置图库" }
-        } catch { report("保存图库未完成", error.localizedDescription + " 原始暂存内容仍保留。") }
+            self.createThumbnail(item)
+            let automatic = captureSettings.automaticallyExportToPhotos
+            publish {
+                self.status = "\(item.kind.title)已保存到内置图库"
+                self.captureFeedback(.saved)
+                if automatic { self.exportToPhotos([item], automatic: true) }
+            }
+        } catch {
+            resumeAfterBackgroundPending = false
+            report("保存图库未完成", error.localizedDescription + " 原始暂存内容仍保留。")
+        }
         refreshLibraryOnQueue()
         finishCaptureStateOnQueue()
     }
 
-    private func createThumbnailOnQueue(_ item: MediaItem) {
-        var image: UIImage?
-        if item.kind == .video {
-            let generator = AVAssetImageGenerator(asset: AVURLAsset(url: item.movieURL))
-            generator.appliesPreferredTrackTransform = true
-            generator.maximumSize = CGSize(width: 400, height: 400)
-            if let cgImage = try? generator.copyCGImage(at: .zero, actualTime: nil) { image = UIImage(cgImage: cgImage) }
-        } else if let data = try? Data(contentsOf: item.imageURL), let original = UIImage(data: data) {
-            let scale = min(1, 400 / max(original.size.width, original.size.height))
-            let size = CGSize(width: original.size.width * scale, height: original.size.height * scale)
-            image = UIGraphicsImageRenderer(size: size).image { _ in original.draw(in: CGRect(origin: .zero, size: size)) }
+    private func createThumbnail(_ item: MediaItem) {
+        Task.detached(priority: .utility) { [weak self] in
+            var image: UIImage?
+            var seconds: Double?
+            if item.kind == .video {
+                let asset = AVURLAsset(url: item.movieURL)
+                let generator = AVAssetImageGenerator(asset: asset)
+                generator.appliesPreferredTrackTransform = true
+                generator.maximumSize = CGSize(width: 400, height: 400)
+                if let result = try? await generator.image(at: .zero) { image = UIImage(cgImage: result.image) }
+                if let duration = try? await asset.load(.duration) { seconds = CMTimeGetSeconds(duration) }
+            } else if let source = CGImageSourceCreateWithURL(item.imageURL as CFURL, nil),
+                      let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                        kCGImageSourceCreateThumbnailFromImageAlways: true,
+                        kCGImageSourceCreateThumbnailWithTransform: true,
+                        kCGImageSourceThumbnailMaxPixelSize: 400] as CFDictionary) {
+                image = UIImage(cgImage: thumbnail)
+            }
+            if let data = image?.jpegData(compressionQuality: 0.75) { try? data.write(to: item.thumbnailURL, options: .atomic) }
+            let duration = seconds
+            guard let self = self else { return }
+            self.captureQueue.async {
+                if let duration = duration { try? MediaLibrary.setDuration(item, seconds: duration) }
+                self.refreshLibraryOnQueue()
+                self.publish { self.thumbnailGeneration += 1 }
+            }
         }
-        if let data = image?.jpegData(compressionQuality: 0.75) { try? data.write(to: item.thumbnailURL, options: .atomic) }
     }
 
     private func finishCaptureStateOnQueue() {
@@ -914,11 +1034,17 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         if !foreground && session.isRunning { session.stopRunning() }
         resumeSessionOnQueue()
         let ready = foreground && session.isRunning && !session.isInterrupted
+            && (!captureSettings.thermalProtection || loadOnQueue != .critical)
         publish { self.isReady = ready; self.endFinishingTask() }
     }
 
     private func resumeSessionOnQueue() {
         guard foreground, configured, capturePhase == .idle else { return }
+        guard !captureSettings.thermalProtection || loadOnQueue != .critical else {
+            if session.isRunning { session.stopRunning() }
+            publish { self.isReady = false; self.status = "等待设备冷却" }
+            return
+        }
         guard !session.isInterrupted else {
             publish { self.isReady = false; self.status = "等待系统解除相机中断" }
             return
@@ -930,6 +1056,15 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             self.isReady = ready
             self.status = ready ? label : "等待相机恢复，可点击重试"
         }
+        requestResumeOnQueue(ready: ready)
+    }
+
+    private func requestResumeOnQueue(ready: Bool) {
+        guard ready, foreground, capturePhase == .idle, resumeAfterBackgroundPending else { return }
+        resumeAfterBackgroundPending = false
+        guard captureSettings.resumeAfterBackground, captureSettings.captureMode == .video,
+              let previous = resumeSourceID else { return }
+        publish { self.resumeRequest = previous }
     }
 
     func refreshLibrary() { captureQueue.async { self.refreshLibraryOnQueue() } }
@@ -940,57 +1075,105 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     }
 
     func exportToPhotos(_ item: MediaItem) {
-        guard canConfigure else { return }
-        phase = .saving
-        beginFinishingTask()
+        exportToPhotos([item], allowRepeats: true)
+    }
+
+    func exportToPhotos(_ items: [MediaItem], allowRepeats: Bool = false, automatic: Bool = false) {
+        let values = items.filter { !exportingPhotoIDs.contains($0.id) && (allowRepeats || $0.exportedAt == nil) }
+        guard !values.isEmpty else { return }
+        if exportingPhotoIDs.isEmpty { failedPhotosExports = 0 }
+        exportingPhotoIDs.formUnion(values.map(\.id))
+        photosExportStatus = "正在导出到系统照片…"
         Task { @MainActor in
+            if !mainForeground && PHPhotoLibrary.authorizationStatus(for: .addOnly) == .notDetermined {
+                exportingPhotoIDs.subtract(values.map(\.id))
+                photosExportStatus = "原件已保存，回到前台授权后可导出"
+                return
+            }
             let granted = await Self.requestPhotosPermission()
             guard granted else {
-                phase = .idle
-                endFinishingTask()
-                showMessage("需要照片添加权限", "请在系统设置中允许添加照片后重试。内置图库中的原件仍保留。")
+                exportingPhotoIDs.subtract(values.map(\.id))
+                photosExportStatus = "未导出到系统照片，App 原件保留"
+                if !automatic { showMessage("需要照片添加权限", "请在系统设置中允许添加照片后重试。内置图库中的原件仍保留。") }
                 return
             }
             captureQueue.async {
-                guard self.capturePhase == .idle else { return }
-                self.setPhase(.saving)
-                guard item.resourceURLs.allSatisfy({ FileManager.default.fileExists(atPath: $0.path) }) else {
-                    self.finishCaptureStateOnQueue()
-                    self.report("原文件不完整", "未进行导出，请检查图库内容。")
-                    return
-                }
-                PHPhotoLibrary.shared().performChanges({
-                    let request = PHAssetCreationRequest.forAsset()
-                    request.creationDate = item.createdAt
-                    request.location = item.location?.clLocation
-                    let options = PHAssetResourceCreationOptions()
-                    // Export is a copy. Keep App library originals on both success and failure.
-                    options.shouldMoveFile = false
-                    switch item.kind {
-                    case .video: request.addResource(with: .video, fileURL: item.movieURL, options: options)
-                    case .photo: request.addResource(with: .photo, fileURL: item.imageURL, options: options)
-                    case .livePhoto:
-                        request.addResource(with: .photo, fileURL: item.imageURL, options: options)
-                        request.addResource(with: .pairedVideo, fileURL: item.movieURL, options: options)
-                    }
-                }) { success, error in
-                    let detail = error?.localizedDescription
-                    self.captureQueue.async {
-                        if success {
-                            do { try MediaLibrary.markExported(item) }
-                            catch { self.report("已导出，标记未更新", "系统照片中已有内容，App 原件保留。" + error.localizedDescription) }
-                            self.report("已导出到系统照片", "拍摄位置和时间已随内容导出，App 内原件仍保留。")
-                        } else { self.report("导出失败", "App 内原件仍保留，可重试。\n" + (detail ?? "系统照片暂不可用")) }
-                        self.refreshLibraryOnQueue()
-                        self.finishCaptureStateOnQueue()
-                    }
-                }
+                self.pendingPhotosExports += values.map { ($0, automatic) }
+                self.processPhotosExportOnQueue()
             }
         }
     }
 
+    private func processPhotosExportOnQueue() {
+        guard !photosExportRunning, !pendingPhotosExports.isEmpty else { return }
+        let (item, automatic) = pendingPhotosExports.removeFirst()
+        photosExportRunning = true
+        guard item.resourceURLs.allSatisfy({ FileManager.default.fileExists(atPath: $0.path) }) else {
+            finishPhotosExportOnQueue(item, success: false, detail: "原文件不完整。", automatic: automatic)
+            return
+        }
+        PHPhotoLibrary.shared().performChanges({
+            let request = PHAssetCreationRequest.forAsset()
+            request.creationDate = item.createdAt
+            request.location = item.location?.clLocation
+            let options = PHAssetResourceCreationOptions()
+            options.shouldMoveFile = false
+            switch item.kind {
+            case .video: request.addResource(with: .video, fileURL: item.movieURL, options: options)
+            case .photo: request.addResource(with: .photo, fileURL: item.imageURL, options: options)
+            case .livePhoto:
+                request.addResource(with: .photo, fileURL: item.imageURL, options: options)
+                request.addResource(with: .pairedVideo, fileURL: item.movieURL, options: options)
+            }
+        }) { success, error in
+            let detail = error?.localizedDescription
+            self.captureQueue.async {
+                self.finishPhotosExportOnQueue(item, success: success, detail: detail, automatic: automatic)
+            }
+        }
+    }
+
+    private func finishPhotosExportOnQueue(_ item: MediaItem, success: Bool, detail: String?, automatic: Bool) {
+        photosExportRunning = false
+        if success {
+            do { try MediaLibrary.markExported(item) }
+            catch { report("已导出，标记未更新", "系统照片已有副本，App 原件保留。" + error.localizedDescription) }
+        }
+        refreshLibraryOnQueue()
+        publish {
+            self.exportingPhotoIDs.remove(item.id)
+            if !success { self.failedPhotosExports += 1 }
+            self.photosExportStatus = self.exportingPhotoIDs.isEmpty
+                ? (self.failedPhotosExports == 0 ? "系统照片导出完成，App 原件保留" : "\(self.failedPhotosExports) 项未导出，App 原件保留，可重试")
+                : "正在导出，剩余 \(self.exportingPhotoIDs.count) 项；失败 \(self.failedPhotosExports) 项"
+            if !success && !automatic { self.showMessage("导出未完成", "App 内原件仍保留。\n" + (detail ?? "系统照片暂不可用")) }
+        }
+        processPhotosExportOnQueue()
+    }
+
+    func prepareShare(_ items: [MediaItem]) {
+        guard !preparingShare, shareExport == nil, !items.isEmpty else { return }
+        preparingShare = true
+        mediaQueue.async {
+            do {
+                let value = try MediaLibrary.prepareExport(items)
+                self.publish { self.preparingShare = false; self.preparedShare = value; self.shareExport = value }
+            } catch {
+                self.publish { self.preparingShare = false }
+                self.report("原件导出未完成", error.localizedDescription)
+            }
+        }
+    }
+
+    func finishSharing() {
+        guard let export = preparedShare else { return }
+        preparedShare = nil
+        shareExport = nil
+        mediaQueue.async { try? FileManager.default.removeItem(at: export.folder) }
+    }
+
     func deleteMedia(_ item: MediaItem) {
-        guard canConfigure else { return }
+        guard canConfigure, !exportingPhotoIDs.contains(item.id), !preparingShare, shareExport == nil else { return }
         captureQueue.async {
             guard self.capturePhase == .idle else { return }
             do { try MediaLibrary.delete(item) }
@@ -1001,6 +1184,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
 
     private func tick() {
         tickCount += 1
+        readCaptureLoadOnQueue()
         if !foreground && capturePhase == .recording && !canContinueInPictureInPicture {
             stopOnQueue(reason: "画中画不可用，正在保存…")
             if session.isRunning { session.stopRunning() }
@@ -1025,6 +1209,43 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         }
     }
 
+    private func readCaptureLoadOnQueue() {
+        let thermal = ProcessInfo.processInfo.thermalState
+        let pressure = videoInput?.device.systemPressureState.level ?? .nominal
+        let value: CaptureLoad
+        if thermal == .critical || pressure == .critical || pressure == .shutdown { value = .critical }
+        else if thermal == .serious || pressure == .serious { value = .elevated }
+        else { value = .normal }
+        updateCaptureLoadOnQueue(value)
+    }
+
+    private func updateCaptureLoadOnQueue(_ value: CaptureLoad) {
+        let old = loadOnQueue
+        loadOnQueue = value
+        if old != value { publish { self.captureLoad = value } }
+        if value == .critical && captureSettings.thermalProtection {
+            resumeAfterBackgroundPending = false
+            turnTorchOff()
+            if capturePhase == .recording || capturePhase == .preparing {
+                stopOnQueue(reason: "设备负载过高，正在停止并保存…")
+                report("设备需要冷却", "已停止录像并尝试保存。画质和帧率没有被自动改变，请等待设备恢复后再拍摄。")
+            } else if capturePhase == .idle {
+                if session.isRunning { session.stopRunning() }
+                publish { self.isReady = false; self.status = "等待设备冷却" }
+            }
+        } else if old == .critical && value != .critical { resumeSessionOnQueue() }
+    }
+
+    private enum CaptureFeedback { case began, stopped, saved }
+    private func captureFeedback(_ value: CaptureFeedback) {
+        guard settings.hapticFeedback, mainForeground else { return }
+        switch value {
+        case .began: UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        case .stopped: UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        case .saved: UINotificationFeedbackGenerator().notificationOccurred(.success)
+        }
+    }
+
     private func installObservers() {
         let center = NotificationCenter.default
         // Playgrounds hosts the running app; also follow UIKit lifecycle events
@@ -1043,6 +1264,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             if self.phase.blocksConfiguration { self.beginFinishingTask() }
             self.captureQueue.async {
                 self.pictureInPictureState = .inactive
+                self.resumeAfterBackgroundPending = false
                 self.turnTorchOff()
                 self.stopOnQueue(reason: "设备已锁定，正在保存…")
                 if self.session.isRunning { self.session.stopRunning() }
@@ -1054,6 +1276,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             guard let self = self else { return }
             let reason = (notification.userInfo?[AVCaptureSessionInterruptionReasonKey] as? NSNumber)?.intValue
             let background = reason == AVCaptureSession.InterruptionReason.videoDeviceNotAvailableInBackground.rawValue
+            if background && UIApplication.shared.applicationState != .active { self.sceneChanged(.background) }
             if self.phase.blocksConfiguration { self.beginFinishingTask() }
             self.captureQueue.async {
                 // A queued notification can outlive the interruption itself.
@@ -1062,6 +1285,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                 self.stopOnQueue(reason: "相机被系统中断，正在保存…")
                 self.publish { self.isReady = false; self.status = "相机暂被系统占用" }
                 if !background {
+                    self.resumeAfterBackgroundPending = false
                     self.report("相机已中断", "相机可能被其他 App 占用，或当前窗口模式不支持摄像。回到前台全屏后可重试。")
                 }
             }
@@ -1111,7 +1335,8 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     }
 
     private func handleRuntimeErrorOnQueue(_ error: NSError?, reportedInForeground: Bool) {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.4.1"
+        if reportedInForeground { resumeAfterBackgroundPending = false }
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.5.0"
         let mode = captureSettings.captureMode == .video ? captureSettings.mode.title : captureSettings.captureMode.title
         let lens = videoInput.map { Self.lensLabel($0.device) } ?? "相机"
         let detail = "随心记 \(version) · \(mode) · \(lens)\n" + CameraErrorDetail.describe(error)

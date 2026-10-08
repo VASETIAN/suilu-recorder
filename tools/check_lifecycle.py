@@ -24,12 +24,14 @@ def extract(source: str, signature: str) -> str:
 def build(controller: Path, output: Path):
     source = controller.read_text(encoding='utf-8')
     settings = (ROOT / 'Recorder.swiftpm/Sources/RecorderSettings.swift').read_text(encoding='utf-8')
+    view = (ROOT / 'Recorder.swiftpm/Sources/ContentView.swift').read_text(encoding='utf-8')
     phase = extract(settings, 'enum RecordingPhase:')
     pip = extract(settings, 'enum CameraPiPState:')
     methods = [extract(source, s) for s in (
         'func sceneChanged(', 'private func finishCaptureStateOnQueue()',
         'private func setPhase(', 'private func stopOnQueue(',
-        'private func handleRuntimeErrorOnQueue(')]
+        'private func handleRuntimeErrorOnQueue(', 'private func completeCaptureOnQueue(',
+        'private func requestResumeOnQueue(', 'private func updateCaptureLoadOnQueue(')]
     if 'private func resumeSessionOnQueue()' in source:
         methods.append(extract(source, 'private func resumeSessionOnQueue()'))
     else:
@@ -59,7 +61,18 @@ final class ReplaySession {
     func startRunning() { starts += 1; isRunning = !isInterrupted }
     func stopRunning() { isRunning = false }
 }
-struct FakeSettings { var captureMode = "video"; var reserveBytes: Int64 = 512; var mode = "4K · 60 fps · HDR" }
+struct FakeSettings {
+    var captureMode = "video", mode = "4K · 60 fps · HDR"
+    var reserveBytes: Int64 = 512
+    var resumeAfterBackground = false, automaticallyExportToPhotos = false, thermalProtection = true, includeLocation = true
+}
+struct MediaItem { var id = UUID(); var kind = "video" }
+enum MediaLibrary {
+    static var fails = false
+    static func finish(_ item: MediaItem) throws {
+        if fails { throw NSError(domain: "Save", code: 1) }
+    }
+}
 struct FakeInput { var device = "后置主摄" }
 let AVFoundationErrorDomain = "AVFoundationErrorDomain"
 enum AVError { enum Code: Int { case mediaServicesWereReset = -11819 } }
@@ -89,10 +102,20 @@ final class Recorder: @unchecked Sendable {
     var tickCount = 0, elapsed: Double = 0
     var availableSpace: Int64?
     var captureSettings = FakeSettings(), status = "ready"
+    var activeItem: MediaItem? = MediaItem()
+    var resumeAfterBackgroundPending = false, resumeSourceID: UUID?
+    var loadOnQueue: CaptureLoad = .normal, captureLoad: CaptureLoad = .normal
+    var resumeRequests: [UUID] = []
+    var resumeRequest: UUID? { didSet { if let value = resumeRequest { resumeRequests.append(value) } } }
     var startConfigurations = 0
     var videoInput: FakeInput?
     var lastCameraError: String?
     var reports: [String] = []
+    var settings: FakeSettings { captureSettings }
+    var message: String?
+    var resumedStarts: [UUID] = []
+    var canRecord: Bool { mainForeground && isReady && phase == .idle }
+    func startRecording(location: String?, resumedFrom: UUID) { resumedStarts.append(resumedFrom); phase = .preparing }
     static func lensLabel(_ value: String) -> String { value }
     func publish(_ action: @escaping @Sendable () -> Void) { uiQueue.async(action) }
     func start() {
@@ -110,9 +133,18 @@ final class Recorder: @unchecked Sendable {
     func endFinishingTask() { finishingTask = false }
     func turnTorchOff() {}
     func publishCapabilities() {}
+    enum CaptureFeedback { case began, stopped, saved }
+    func captureFeedback(_ value: CaptureFeedback) {}
+    func createThumbnail(_ item: MediaItem) {}
+    func exportToPhotos(_ items: [MediaItem], automatic: Bool) {}
+    func refreshLibraryOnQueue() {}
+    func readCaptureLoadOnQueue() {}
     func report(_ title: String, _ detail: String) { reports.append(title + "\n" + detail) }
     func fireTimer() { tick() }
     func completedFile() { finishCaptureStateOnQueue() }
+    func savedFile() { completeCaptureOnQueue(activeItem!) }
+    func manualStop() { stopOnQueue(reason: "manual") }
+    func setLoad(_ value: CaptureLoad) { updateCaptureLoadOnQueue(value) }
     func interruptionEnded() { resumeSessionOnQueue() }
     func runtimeError(_ error: NSError?, reportedInForeground: Bool = true) {
         handleRuntimeErrorOnQueue(error, reportedInForeground: reportedInForeground)
@@ -278,10 +310,119 @@ activeError.runtimeError(cameraError); activeError.pump()
 assert(activeError.capturePhase == .finishing && !activeError.movieOutput.isRecording && !activeError.isReady)
 assert(activeError.reports.count == 1 && activeError.lastCameraError!.contains("-11800"))
 print("PASS: bounded reset recovery, delayed/background errors, active recording finish and native NSError diagnostics")
+// Resume is opt-in, saves a separate segment, and consumes one pending intent.
+let defaultOff = recordingRecorder()
+defaultOff.sceneChanged(.background); defaultOff.pump()
+defaultOff.sceneChanged(.active); defaultOff.pump()
+defaultOff.savedFile(); defaultOff.pump()
+assert(defaultOff.resumeRequests.isEmpty)
+for returnBeforeSave in [true, false] {
+    let resume = recordingRecorder()
+    resume.captureSettings.resumeAfterBackground = true
+    let original = resume.activeItem!.id
+    resume.sceneChanged(.background); resume.pump()
+    assert(resume.capturePhase == .finishing && resume.resumeRequests.isEmpty)
+    if returnBeforeSave {
+        resume.sceneChanged(.active); resume.pump()
+        assert(resume.resumeRequests.isEmpty && !resume.isReady)
+        resume.savedFile(); resume.pump()
+    } else {
+        resume.savedFile(); resume.pump()
+        assert(resume.resumeRequests.isEmpty && !resume.isReady)
+        resume.sceneChanged(.active); resume.pump()
+    }
+    resume.sceneChanged(.active); resume.completedFile(); resume.pump()
+    assert(resume.resumeRequests == [original] && resume.isReady)
+}
+let failedSave = recordingRecorder()
+failedSave.captureSettings.resumeAfterBackground = true
+failedSave.sceneChanged(.background); failedSave.pump()
+failedSave.sceneChanged(.active); failedSave.pump()
+MediaLibrary.fails = true; failedSave.savedFile(); failedSave.pump(); MediaLibrary.fails = false
+assert(failedSave.resumeRequests.isEmpty && !failedSave.reports.isEmpty)
+for inactiveMode in ["photo", "livePhoto"] {
+    let photo = recordingRecorder()
+    photo.captureSettings.captureMode = inactiveMode
+    photo.captureSettings.resumeAfterBackground = true
+    photo.sceneChanged(.background); photo.pump(); photo.savedFile(); photo.pump()
+    photo.sceneChanged(.active); photo.pump()
+    assert(photo.resumeRequests.isEmpty)
+}
+let continuedPiP = recordingRecorder()
+continuedPiP.captureSettings.resumeAfterBackground = true
+continuedPiP.setPictureInPictureState(.active); continuedPiP.pump()
+continuedPiP.sceneChanged(.background); continuedPiP.pump()
+continuedPiP.sceneChanged(.active); continuedPiP.pump()
+assert(continuedPiP.capturePhase == .recording && continuedPiP.resumeRequests.isEmpty)
+let interruptedResume = recordingRecorder()
+interruptedResume.captureSettings.resumeAfterBackground = true
+interruptedResume.sceneChanged(.background); interruptedResume.pump()
+interruptedResume.session.isInterrupted = true
+interruptedResume.savedFile(); interruptedResume.pump()
+interruptedResume.sceneChanged(.active); interruptedResume.pump()
+assert(interruptedResume.resumeRequests.isEmpty)
+interruptedResume.session.isInterrupted = false
+interruptedResume.interruptionEnded(); interruptedResume.pump()
+assert(interruptedResume.resumeRequests.count == 1)
+let overheating = recordingRecorder()
+overheating.captureSettings.resumeAfterBackground = true
+overheating.setLoad(.elevated); overheating.pump()
+assert(overheating.capturePhase == .recording && overheating.captureSettings.mode == "4K · 60 fps · HDR")
+overheating.setLoad(.critical); overheating.pump()
+assert(overheating.capturePhase == .finishing && !overheating.movieOutput.isRecording)
+overheating.savedFile(); overheating.pump()
+assert(!overheating.isReady && !overheating.session.isRunning && overheating.resumeRequests.isEmpty)
+overheating.setLoad(.normal); overheating.pump()
+assert(overheating.isReady && overheating.resumeRequests.isEmpty)
+let unprotected = recordingRecorder()
+unprotected.captureSettings.thermalProtection = false
+unprotected.setLoad(.critical); unprotected.pump()
+assert(unprotected.capturePhase == .recording && unprotected.movieOutput.isRecording)
+print("PASS: default-off resume, both save/return orders, one request, failed saves, photo/PiP exclusions, interruption and thermal protection")
+struct ReplayLocation { func snapshot() -> String? { "current location" } }
+final class ReplayView {
+    let recorder = Recorder(), location = ReplayLocation()
+    var scenePhase = ScenePhase.background
+    var showSettings = false, showLibrary = false, blackBeforeLeaving = true, restoreBlackAfterResume = false
+    var pendingResumeID: UUID?, isBlack = false
+    var leavingSnapshotTaken = false
+    func setBlackScreen(_ value: Bool) { isBlack = value }
+    func reconcile() { restoreOrResumeCapture() }
+    func leave() { rememberBlackBeforeLeaving(); setBlackScreen(false) }
+    VIEW_METHOD
+    SNAPSHOT_METHOD
+}
+let uiResume = ReplayView()
+uiResume.recorder.captureSettings.resumeAfterBackground = true
+let segmentID = UUID()
+uiResume.pendingResumeID = segmentID
+uiResume.reconcile()
+assert(uiResume.recorder.resumedStarts.isEmpty && uiResume.pendingResumeID == segmentID)
+uiResume.scenePhase = .active; uiResume.recorder.isReady = false; uiResume.reconcile()
+assert(uiResume.recorder.resumedStarts.isEmpty && uiResume.pendingResumeID == segmentID)
+uiResume.recorder.isReady = true; uiResume.reconcile(); uiResume.reconcile()
+assert(uiResume.recorder.resumedStarts == [segmentID] && uiResume.restoreBlackAfterResume && uiResume.pendingResumeID == nil)
+let uiPiP = ReplayView()
+uiPiP.recorder.captureSettings.resumeAfterBackground = true
+uiPiP.recorder.phase = .recording; uiPiP.scenePhase = .active
+uiPiP.reconcile()
+assert(uiPiP.isBlack && uiPiP.recorder.resumedStarts.isEmpty)
+uiPiP.leave(); uiPiP.leave()
+assert(uiPiP.blackBeforeLeaving && !uiPiP.isBlack, "Duplicate UIKit/SwiftUI deactivation must preserve the original black state")
+for blocker in ["settings", "library", "error", "disabled"] {
+    let blockedView = ReplayView()
+    blockedView.scenePhase = .active; blockedView.pendingResumeID = UUID()
+    blockedView.recorder.captureSettings.resumeAfterBackground = blocker != "disabled"
+    blockedView.showSettings = blocker == "settings"; blockedView.showLibrary = blocker == "library"
+    blockedView.recorder.message = blocker == "error" ? "error" : nil
+    blockedView.reconcile()
+    assert(blockedView.recorder.resumedStarts.isEmpty)
+}
+print("PASS: production UI reconciliation waits for active/ready, consumes once, carries black-screen intent and respects sheets/errors/default off")
 print("Replay uses fake session and queues; AVKit, Apple SDK and physical device behavior are not tested.")
-'''.replace('METHODS', '\n'.join(methods))
+'''.replace('METHODS', '\n'.join(methods)).replace('VIEW_METHOD', extract(view, 'private func restoreOrResumeCapture()')).replace('SNAPSHOT_METHOD', extract(view, 'private func rememberBlackBeforeLeaving()'))
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(phase + '\n' + pip + '\n' + extract(settings, 'enum CameraErrorDetail {') + '\n' + harness, encoding='utf-8')
+    output.write_text(phase + '\n' + pip + '\n' + extract(settings, 'enum CaptureLoad:') + '\n' + extract(settings, 'enum CameraErrorDetail {') + '\n' + harness, encoding='utf-8')
 
 
 if __name__ == '__main__':

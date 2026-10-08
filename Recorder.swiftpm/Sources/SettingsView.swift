@@ -71,6 +71,10 @@ struct SettingsView: View {
                 .disabled(!recorder.canConfigure)
 
                 Section("多任务与返回相机") {
+                    Toggle("返回 App 后自动恢复录像", isOn: $draft.resumeAfterBackground)
+                        .disabled(!recorder.canConfigure)
+                    Text("默认关闭。开启后，离开前台会保存当前一段；回到 App 且保存、相机和权限正常后，用原参数开始新的一段，并恢复此前的黑屏。离开的时间没有画面，不拼接文件；退出进程不会自动录像。保存失败、空间不足、过热或相机错误时取消恢复。")
+                        .font(.caption).foregroundStyle(.secondary)
                     LabeledContent("分屏 / 侧拉拍摄", value: recorder.multitaskingCameraSupported ? "运行环境支持" : "当前环境不支持")
                     LabeledContent("系统画中画", value: pictureInPicture.status)
                     Text("开始录像后手动点击主界面的‘画中画’，等实时小窗出现后再返回主屏幕。仅系统允许多任务相机的环境可以继续录像。关闭后台小窗、将小窗收起或相机被中断时停止并保存；回到前台后关闭画中画可继续录像。")
@@ -100,11 +104,27 @@ struct SettingsView: View {
                 }
 
                 Section("内置图库") {
+                    Toggle("拍摄后自动导出到系统照片", isOn: $draft.automaticallyExportToPhotos)
+                        .disabled(!recorder.canConfigure)
                     LabeledContent("拍摄内容", value: "\(recorder.libraryItems.count) 项")
                     Button("打开内置图库") { showLibrary = true }.disabled(!recorder.canConfigure)
-                    Text("照片、Live Photo 和视频先保存在 App 内。图库中可预览、查看拍摄信息、导出到系统照片或导出文件；导出后保留原件。")
+                    Text("照片、Live Photo 和视频先保存在 App 内，系统照片导出独立进行。图库支持日期筛选、多选导出，以及原件连同拍摄信息一起共享；所有导出保留 App 原件。")
                         .font(.caption).foregroundStyle(.secondary)
+                    if !recorder.photosExportStatus.isEmpty { Text(recorder.photosExportStatus).font(.caption) }
                 }
+
+                Section("操作与高负载保护") {
+                    Toggle("拍摄操作震动反馈", isOn: $draft.hapticFeedback)
+                    Text("开始录像为中等轻震，停止为轻震，原文件保存成功为成功反馈。设备不支持触觉反馈时不会震动。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Toggle("温度和相机高负载保护", isOn: $draft.thermalProtection)
+                    Text(recorder.captureLoad.warning ?? "温度和相机负载正常")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("负载升高时提醒降低帧率；达到严重状态时停止保存并暂停相机，恢复后需重新录像。不会悄悄改变 SDR／HDR 或帧率。关闭保护也不能阻止系统自行中断相机。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("取景器单击对焦，长按锁定当前对焦和曝光，单击解除；上下滑动调节曝光。调整仍使用苹果原生相机接口。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.disabled(!recorder.canConfigure)
 
                 Section("拍摄位置") {
                     Toggle("在照片和视频中记录定位信息", isOn: $draft.includeLocation)
@@ -122,7 +142,7 @@ struct SettingsView: View {
                 }
 
                 Section("关于随心记") {
-                    LabeledContent("版本", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.4.1")
+                    LabeledContent("版本", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.5.0")
                     Text("使用 Apple 原生拍摄、画质优先处理、自动白平衡和支持时的镜头畸变校正。原照片直接保存，App 不加美颜或 AI 滤镜。系统是否使用多帧融合等处理由设备和场景决定，成片不保证与系统相机所有模式一致。")
                         .font(.caption).foregroundStyle(.secondary)
                     Text("开始前选择长焦倍率会使用真实长焦镜头；受格式能力限制，可能自动降低帧率。4K120 通常需要主摄。其他倍率可能是传感器裁切或数字变焦。照片 JPEG、视频 MOV，Live Photo 保留配对文件。")

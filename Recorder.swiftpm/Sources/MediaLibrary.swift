@@ -36,6 +36,10 @@ struct MediaItem: Codable, Identifiable, Equatable, Sendable {
     var duration: Double?
     var exportedAt: Date?
     var recovered = false
+    var zoomFactor: Double?
+    var exposureBias: Float?
+    var focusExposureLocked: Bool?
+    var resumedFromID: UUID?
     var folder: URL { MediaLibrary.directory.appendingPathComponent(id.uuidString, isDirectory: true) }
     var imageURL: URL { folder.appendingPathComponent("photo.jpg") }
     var movieURL: URL { folder.appendingPathComponent(kind == .video ? "video.mov" : "live.mov") }
@@ -51,6 +55,12 @@ struct MediaItem: Codable, Identifiable, Equatable, Sendable {
         resourceURLs.reduce(0) { $0 + Int64((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
     }
     var dateLabel: String { createdAt.formatted(date: .abbreviated, time: .shortened) }
+}
+
+struct MediaExport: Identifiable, Sendable {
+    let id = UUID()
+    let folder: URL
+    let urls: [URL]
 }
 
 // Called on RecorderController's captureQueue. A capture is written to Staging,
@@ -103,10 +113,83 @@ enum MediaLibrary {
             return item
         }.sorted { $0.createdAt > $1.createdAt }
     }
+    static func item(_ id: UUID) throws -> MediaItem {
+        let folder = directory.appendingPathComponent(id.uuidString, isDirectory: true)
+        let value = try JSONDecoder().decode(MediaItem.self, from: Data(contentsOf: folder.appendingPathComponent("asset.json")))
+        guard value.id == id else { throw LibraryError("拍摄信息与文件不匹配。") }
+        return value
+    }
     static func markExported(_ item: MediaItem) throws {
-        var value = item
+        var value = try self.item(item.id)
         value.exportedAt = Date()
         try write(value, in: value.folder)
+    }
+    static func setDuration(_ item: MediaItem, seconds: Double) throws {
+        guard seconds.isFinite, seconds >= 0 else { return }
+        var value = try self.item(item.id)
+        value.duration = seconds
+        try write(value, in: value.folder)
+    }
+
+    static func filtered(_ items: [MediaItem], kind: CaptureMode?, day: Date?) -> [MediaItem] {
+        items.filter { item in
+            (kind == nil || item.kind == kind)
+                && (day.map { Calendar.current.isDate(item.createdAt, inSameDayAs: $0) } ?? true)
+        }
+    }
+
+    // Prepare uniquely named copies and one information file for the system share sheet.
+    // Originals remain untouched. The owner removes this specific temporary folder on dismissal.
+    static func prepareExport(_ items: [MediaItem]) throws -> MediaExport {
+        guard !items.isEmpty else { throw LibraryError("请先选择拍摄内容。") }
+        let bytes = items.reduce(Int64(0)) { $0 + $1.size }
+        guard let available = RecorderFiles.availableBytes(), available > bytes + 32 * 1_048_576 else {
+            throw LibraryError("导出原件需要额外暂存空间，App 内原件仍保留。")
+        }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("RecorderShare-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        do {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = "yyyyMMdd-HHmmss"
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            var records: [[String: Any]] = []
+            var urls: [URL] = []
+            for selected in items {
+                let value = try item(selected.id)
+                let prefix = formatter.string(from: value.createdAt) + "-" + value.id.uuidString
+                var names: [String] = []
+                for original in value.resourceURLs {
+                    let name = prefix + "-" + original.lastPathComponent
+                    let copy = folder.appendingPathComponent(name)
+                    try FileManager.default.copyItem(at: original, to: copy)
+                    urls.append(copy)
+                    names.append(name)
+                }
+                var info = try JSONSerialization.jsonObject(with: encoder.encode(value)) as! [String: Any]
+                info["files"] = names
+                records.append(info)
+            }
+            let metadata = folder.appendingPathComponent("拍摄信息.json")
+            try JSONSerialization.data(withJSONObject: ["schemaVersion": 1, "dateTimeZone": "UTC", "items": records], options: [.prettyPrinted, .sortedKeys])
+                .write(to: metadata, options: .atomic)
+            urls.append(metadata)
+            return MediaExport(folder: folder, urls: urls)
+        } catch {
+            try? FileManager.default.removeItem(at: folder)
+            throw error
+        }
+    }
+
+    static func cleanOldShareExports() {
+        let temporary = FileManager.default.temporaryDirectory
+        let folders = (try? FileManager.default.contentsOfDirectory(at: temporary, includingPropertiesForKeys: nil)) ?? []
+        for folder in folders where folder.lastPathComponent.hasPrefix("RecorderShare-") {
+            guard UUID(uuidString: String(folder.lastPathComponent.dropFirst("RecorderShare-".count))) != nil else { continue }
+            try? FileManager.default.removeItem(at: folder)
+        }
     }
     static func delete(_ item: MediaItem) throws {
         // Folder comes from a UUID, never from a caller-supplied path.

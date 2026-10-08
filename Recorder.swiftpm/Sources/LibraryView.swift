@@ -9,7 +9,12 @@ struct LibraryView: View {
     @ObservedObject var recorder: RecorderController
     @Environment(\.dismiss) private var dismiss
     @State private var filter: CaptureMode?
-    private var items: [MediaItem] { recorder.libraryItems.filter { filter == nil || $0.kind == filter } }
+    @State private var filterByDate = false
+    @State private var day = Date()
+    @State private var selecting = false
+    @State private var selectedIDs: Set<UUID> = []
+    private var items: [MediaItem] { MediaLibrary.filtered(recorder.libraryItems, kind: filter, day: filterByDate ? day : nil) }
+    private var selected: [MediaItem] { items.filter { selectedIDs.contains($0.id) } }
 
     var body: some View {
         NavigationStack {
@@ -18,6 +23,14 @@ struct LibraryView: View {
                     Text("全部").tag(Optional<CaptureMode>.none)
                     ForEach(CaptureMode.allCases) { Text($0.title).tag(Optional($0)) }
                 }.pickerStyle(.segmented).padding()
+                HStack {
+                    Toggle("按日期筛选", isOn: $filterByDate)
+                    if filterByDate { DatePicker("日期", selection: $day, displayedComponents: .date).labelsHidden() }
+                }.padding(.horizontal).padding(.bottom, 8)
+                if !recorder.photosExportStatus.isEmpty {
+                    Text(recorder.photosExportStatus).font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+                }
+                if recorder.preparingShare { ProgressView("正在准备原件与拍摄信息…").padding(8) }
                 if items.isEmpty {
                     Spacer()
                     Image(systemName: "photo.on.rectangle.angled").font(.system(size: 60)).foregroundStyle(.secondary)
@@ -29,35 +42,77 @@ struct LibraryView: View {
                     ScrollView {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 10)], spacing: 14) {
                             ForEach(items) { item in
-                                NavigationLink {
-                                    MediaDetailView(recorder: recorder, itemID: item.id)
-                                } label: {
-                                    VStack(alignment: .leading, spacing: 6) {
-                                        MediaThumbnail(item: item)
-                                            .frame(height: 150).frame(maxWidth: .infinity)
-                                            .background(.gray.opacity(0.15)).clipped()
-                                            .overlay(alignment: .bottomLeading) {
-                                                Text(item.kind.title).font(.caption.bold()).padding(6)
-                                                    .background(.black.opacity(0.65), in: Capsule()).padding(6)
-                                            }
-                                            .clipShape(RoundedRectangle(cornerRadius: 12))
-                                        Text(item.dateLabel).font(.caption).lineLimit(1)
-                                        Text(item.exportedAt == nil ? "保存在 App 内" : "已导出到系统照片")
-                                            .font(.caption2).foregroundStyle(.secondary)
-                                    }
-                                }.buttonStyle(.plain)
+                                if selecting {
+                                    Button {
+                                        if selectedIDs.contains(item.id) { selectedIDs.remove(item.id) }
+                                        else { selectedIDs.insert(item.id) }
+                                    } label: {
+                                        tile(item).overlay(alignment: .topTrailing) {
+                                            Image(systemName: selectedIDs.contains(item.id) ? "checkmark.circle.fill" : "circle")
+                                                .foregroundStyle(.white).padding(8).background(.black.opacity(0.5), in: Circle())
+                                        }
+                                    }.buttonStyle(.plain).accessibilityLabel("\(item.kind.title)，\(item.dateLabel)")
+                                        .accessibilityValue(selectedIDs.contains(item.id) ? "已选中" : "未选中")
+                                } else {
+                                    NavigationLink { MediaDetailView(recorder: recorder, itemID: item.id) } label: { tile(item) }
+                                        .buttonStyle(.plain)
+                                }
                             }
                         }.padding(.horizontal).padding(.bottom)
                     }
                 }
             }
             .navigationTitle("内置图库 · \(recorder.libraryItems.count)")
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button(selecting ? "取消选择" : "选择") { selecting.toggle(); selectedIDs.removeAll() }
+                }
+                ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } }
+            }
+            .safeAreaInset(edge: .bottom) {
+                if selecting {
+                    VStack(spacing: 8) {
+                        HStack {
+                            Text("已选择 \(selected.count) 项").font(.caption)
+                            Spacer()
+                            Button("全选当前结果") { selectedIDs = Set(items.map(\.id)) }.font(.caption)
+                        }
+                        HStack {
+                            Button("导出系统照片") { recorder.exportToPhotos(selected) }
+                                .disabled(selected.isEmpty || !recorder.exportingPhotoIDs.isEmpty)
+                            Spacer()
+                            Button("原件与拍摄信息") { recorder.prepareShare(selected) }
+                                .disabled(selected.isEmpty || recorder.preparingShare)
+                        }
+                        Text("系统照片批量导出跳过已导出项；原件与信息可在共享页存到文件。")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }.padding().background(.ultraThinMaterial)
+                }
+            }
+            .sheet(item: $recorder.shareExport, onDismiss: recorder.finishSharing) { export in ShareMediaView(urls: export.urls) }
         }
         .preferredColorScheme(.dark)
         .onAppear { recorder.refreshLibrary() }
+        .onChange(of: filter) { _ in selectedIDs.removeAll() }
+        .onChange(of: filterByDate) { _ in selectedIDs.removeAll() }
+        .onChange(of: day) { _ in selectedIDs.removeAll() }
         .alert(item: $recorder.message) { value in
             Alert(title: Text(value.title), message: Text(value.detail), dismissButton: .default(Text("知道了")))
+        }
+    }
+
+    private func tile(_ item: MediaItem) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            MediaThumbnail(item: item, generation: recorder.thumbnailGeneration)
+                .frame(height: 150).frame(maxWidth: .infinity)
+                .background(.gray.opacity(0.15)).clipped()
+                .overlay(alignment: .bottomLeading) {
+                    Text(item.kind.title).font(.caption.bold()).padding(6)
+                        .background(.black.opacity(0.65), in: Capsule()).padding(6)
+                }.clipShape(RoundedRectangle(cornerRadius: 12))
+            Text(item.dateLabel).font(.caption).lineLimit(1)
+            Text(recorder.exportingPhotoIDs.contains(item.id) ? "正在导出…" : item.exportedAt == nil ? "保存在 App 内" : "已导出到系统照片")
+                .font(.caption2).foregroundStyle(.secondary)
         }
     }
 }
@@ -65,13 +120,14 @@ struct LibraryView: View {
 @MainActor
 private struct MediaThumbnail: View {
     let item: MediaItem
+    let generation: Int
     @State private var image: UIImage?
     var body: some View {
         Group {
             if let image = image { Image(uiImage: image).resizable().scaledToFill() }
             else { Image(systemName: item.kind == .video ? "video.fill" : "photo.fill").font(.largeTitle).foregroundStyle(.secondary) }
         }
-        .task(id: item.id) {
+        .task(id: "\(item.id)-\(generation)") {
             let url = item.thumbnailURL
             let data = await Task.detached(priority: .utility) { try? Data(contentsOf: url) }.value
             if let data = data { image = UIImage(data: data) }
@@ -84,7 +140,6 @@ private struct MediaDetailView: View {
     @ObservedObject var recorder: RecorderController
     let itemID: UUID
     @Environment(\.dismiss) private var dismiss
-    @State private var share = false
     @State private var deleting = false
     @State private var repeatExport = false
     private var item: MediaItem? { recorder.libraryItems.first { $0.id == itemID } }
@@ -101,11 +156,13 @@ private struct MediaDetailView: View {
                                 else { recorder.exportToPhotos(item) }
                             } label: {
                                 Label(item.exportedAt == nil ? "导出到系统照片" : "再次导出", systemImage: "square.and.arrow.down")
-                            }.buttonStyle(.borderedProminent)
-                            Button { share = true } label: { Label("导出文件", systemImage: "square.and.arrow.up") }
+                            }.buttonStyle(.borderedProminent).disabled(recorder.exportingPhotoIDs.contains(item.id))
+                            Button { recorder.prepareShare([item]) } label: { Label("原件与信息", systemImage: "square.and.arrow.up") }
                                 .buttonStyle(.bordered)
+                                .disabled(recorder.preparingShare)
                         }.disabled(!recorder.canConfigure)
-                        if recorder.phase == .saving { ProgressView("正在导出…") }
+                        if recorder.exportingPhotoIDs.contains(item.id) { ProgressView("正在导出…") }
+                        if recorder.preparingShare { ProgressView("正在准备原件…") }
                         VStack(spacing: 12) {
                             detailRow("类型", item.kind.title)
                             detailRow("拍摄时间", item.dateLabel)
@@ -113,6 +170,14 @@ private struct MediaDetailView: View {
                             detailRow("分辨率", item.resolution)
                             if let fps = item.fps { detailRow("帧率", "\(fps) fps") }
                             if let range = item.dynamicRange { detailRow("动态范围", range) }
+                            if let zoom = item.zoomFactor { detailRow("拍摄倍率", String(format: "%.2f×", zoom)) }
+                            if let bias = item.exposureBias { detailRow("曝光补偿", String(format: "%+.1f EV", bias)) }
+                            if let locked = item.focusExposureLocked { detailRow("对焦曝光锁定", locked ? "已锁定" : "自动") }
+                            if let previous = item.resumedFromID {
+                                detailRow("接续录像", String(previous.uuidString.prefix(8)))
+                                Text("此文件是返回 App 后新录的一段，离开期间没有画面。")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
                             if let seconds = item.duration { detailRow("时长", String(format: "%.1f 秒", seconds)) }
                             detailRow("声音", item.hasAudio ? "有声" : "无声")
                             detailRow("文件大小", RecorderFiles.sizeLabel(item.size))
@@ -137,10 +202,9 @@ private struct MediaDetailView: View {
                         Text("导出后 App 内原件保留。删除 App 或工程的应用数据会失去仅保存在内置图库的内容。")
                             .font(.caption).foregroundStyle(.secondary)
                         Button("删除 App 内原件", role: .destructive) { deleting = true }
-                            .disabled(!recorder.canConfigure)
+                            .disabled(!recorder.canConfigure || recorder.exportingPhotoIDs.contains(item.id) || recorder.preparingShare || recorder.shareExport != nil)
                     }.padding()
                 }
-                .sheet(isPresented: $share) { ShareMediaView(urls: item.resourceURLs) }
                 .confirmationDialog("再次导出会在系统照片中添加一份副本", isPresented: $repeatExport, titleVisibility: .visible) {
                     Button("再次导出") { recorder.exportToPhotos(item) }
                     Button("取消", role: .cancel) {}

@@ -8,6 +8,10 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var isBlack = false
     @State private var showLibrary = false
+    @State private var blackBeforeLeaving = false
+    @State private var leavingSnapshotTaken = false
+    @State private var restoreBlackAfterResume = false
+    @State private var pendingResumeID: UUID?
     @StateObject private var location = LocationService()
     @StateObject private var brightness = ScreenBrightness()
     @StateObject private var pictureInPicture = RecorderPictureInPicture()
@@ -25,6 +29,10 @@ struct ContentView: View {
                     .ignoresSafeArea().allowsHitTesting(false)
                 VStack(spacing: landscape ? 8 : 14) {
                     header
+                    if let warning = recorder.captureLoad.warning {
+                        Text(warning).font(.caption).foregroundStyle(.orange)
+                            .padding(8).background(.black.opacity(0.55), in: Capsule())
+                    }
                     Spacer(minLength: 8)
                     if !recorder.isReady && recorder.phase == .idle { unavailableView }
                     Spacer(minLength: 8)
@@ -58,6 +66,7 @@ struct ContentView: View {
         }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false; setBlackScreen(false) }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            rememberBlackBeforeLeaving()
             setBlackScreen(false)
             UIApplication.shared.isIdleTimerDisabled = false
         }
@@ -67,26 +76,42 @@ struct ContentView: View {
             setBlackScreen(false)
         }
         .onChange(of: scenePhase) { value in
-            if value != .active { setBlackScreen(false) }
+            if value == .background { pendingResumeID = nil }
+            if value == .active { leavingSnapshotTaken = false }
+            if value != .active { rememberBlackBeforeLeaving(); setBlackScreen(false) }
             location.setEnabled(recorder.settings.includeLocation, foreground: value == .active)
             recorder.sceneChanged(value)
             updateIdleTimer()
+            restoreOrResumeCapture()
         }
         .onChange(of: recorder.phase) { value in
-            if value == .recording && recorder.settings.autoBlackScreen && scenePhase == .active { setBlackScreen(true) }
+            if value == .recording && (recorder.settings.autoBlackScreen || restoreBlackAfterResume) && scenePhase == .active {
+                setBlackScreen(true)
+                restoreBlackAfterResume = false
+            }
             if recorder.settings.captureMode == .video && value != .recording { setBlackScreen(false) }
             updateIdleTimer()
+            restoreOrResumeCapture()
         }
         // A failure / low-space notice must be visible even if the content is black.
         .onChange(of: recorder.message?.id) { value in
-            if value != nil { setBlackScreen(false) }
+            if value != nil {
+                setBlackScreen(false)
+                pendingResumeID = nil
+                restoreBlackAfterResume = false
+                blackBeforeLeaving = false
+            }
         }
         .onChange(of: recorder.settings.includeLocation) { value in
             location.setEnabled(value, foreground: scenePhase == .active)
         }
         .onChange(of: recorder.settings.dimBlackScreen) { _ in setBlackScreen(isBlack) }
-        .onChange(of: recorder.settings.captureMode) { _ in setBlackScreen(false) }
-        .onChange(of: recorder.isReady) { ready in if !ready { setBlackScreen(false) } }
+        .onChange(of: recorder.settings.captureMode) { _ in setBlackScreen(false); pendingResumeID = nil }
+        .onChange(of: recorder.isReady) { ready in
+            if !ready { setBlackScreen(false) }
+            restoreOrResumeCapture()
+        }
+        .onChange(of: recorder.resumeRequest) { value in pendingResumeID = value; restoreOrResumeCapture() }
     }
 
     private var header: some View {
@@ -123,7 +148,7 @@ struct ContentView: View {
             .disabled(!recorder.hasTorch || !recorder.isReady)
             .opacity(recorder.hasTorch ? 1 : 0.35)
             .accessibilityLabel(recorder.torchOn ? "关闭补光灯" : "开启补光灯")
-            Button { showSettings = true } label: {
+            Button { pendingResumeID = nil; showSettings = true } label: {
                 Image(systemName: "gearshape.fill").font(.title3)
                     .frame(width: 44, height: 44)
                     .background(.black.opacity(0.35), in: Circle())
@@ -138,7 +163,10 @@ struct ContentView: View {
         VStack(spacing: 12) {
             Image(systemName: "video.slash.fill").font(.largeTitle)
             Text(recorder.status).font(.headline).multilineTextAlignment(.center)
-            if recorder.isConfiguring {
+            if recorder.captureLoad == .critical && recorder.settings.thermalProtection {
+                Text("设备恢复后相机会重新准备，录像需重新开始。")
+                    .font(.caption).multilineTextAlignment(.center)
+            } else if recorder.isConfiguring {
                 ProgressView().tint(.white)
             } else {
                 HStack {
@@ -218,6 +246,7 @@ struct ContentView: View {
             .accessibilityValue("当前倍率 \(Double(recorder.zoom), specifier: "%.1f") 倍")
             HStack(spacing: 24) {
                 cameraButton(symbol: "photo.on.rectangle.angled", title: "相册", enabled: recorder.canConfigure) {
+                    pendingResumeID = nil
                     showLibrary = true
                 }
                 Spacer(minLength: 0)
@@ -255,15 +284,38 @@ struct ContentView: View {
     }
 
     private func capture() {
+        pendingResumeID = nil
+        blackBeforeLeaving = false
         if recorder.phase == .recording { recorder.stopRecording() }
         else if recorder.canRecord {
             let position = recorder.settings.includeLocation ? location.snapshot() : nil
             if recorder.settings.captureMode == .video { recorder.startRecording(location: position) }
             else {
                 recorder.takePhoto(location: position)
-                if isBlack { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
             }
         }
+    }
+
+    private func rememberBlackBeforeLeaving() {
+        guard !leavingSnapshotTaken else { return }
+        blackBeforeLeaving = isBlack
+        leavingSnapshotTaken = true
+    }
+
+    private func restoreOrResumeCapture() {
+        guard scenePhase == .active, recorder.settings.resumeAfterBackground,
+              !showSettings, !showLibrary, recorder.message == nil else { return }
+        if recorder.phase == .recording {
+            pendingResumeID = nil
+            if blackBeforeLeaving && recorder.isReady { setBlackScreen(true); blackBeforeLeaving = false }
+            return
+        }
+        guard let previous = pendingResumeID, recorder.canRecord else { return }
+        pendingResumeID = nil
+        restoreBlackAfterResume = blackBeforeLeaving
+        blackBeforeLeaving = false
+        let position = recorder.settings.includeLocation ? location.snapshot() : nil
+        recorder.startRecording(location: position, resumedFrom: previous)
     }
 
     private func cameraButton(symbol: String, title: String, enabled: Bool,

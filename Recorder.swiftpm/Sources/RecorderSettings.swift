@@ -98,6 +98,10 @@ struct RecorderSettings: Codable, Equatable, Sendable {
     var livePhotoEnabled = false
     var dimBlackScreen = true
     var includeLocation = true
+    var resumeAfterBackground = false
+    var automaticallyExportToPhotos = false
+    var hapticFeedback = true
+    var thermalProtection = true
     var mode: VideoMode { VideoMode(quality: quality, fps: fps, dynamicRange: dynamicRange) }
     var reserveBytes: Int64 { Int64(reserveMB) * 1_048_576 }
 
@@ -121,6 +125,10 @@ struct RecorderSettings: Codable, Equatable, Sendable {
                 value.livePhotoEnabled = old["livePhotoEnabled"] as? Bool ?? (value.captureMode == .livePhoto)
                 value.dimBlackScreen = old["dimBlackScreen"] as? Bool ?? true
                 value.includeLocation = old["includeLocation"] as? Bool ?? true
+                value.resumeAfterBackground = old["resumeAfterBackground"] as? Bool ?? false
+                value.automaticallyExportToPhotos = old["automaticallyExportToPhotos"] as? Bool ?? false
+                value.hapticFeedback = old["hapticFeedback"] as? Bool ?? true
+                value.thermalProtection = old["thermalProtection"] as? Bool ?? true
             }
             if ![24, 30, 60, 120].contains(value.fps) { value.fps = 30 }
             if ![512, 1024, 2048].contains(value.reserveMB) { value.reserveMB = 512 }
@@ -134,6 +142,24 @@ struct RecorderSettings: Codable, Equatable, Sendable {
     func save() {
         if let data = try? JSONEncoder().encode(self) {
             UserDefaults.standard.set(data, forKey: "Recorder.settings.v1")
+        }
+    }
+
+    func hasSameCaptureConfiguration(as other: Self) -> Bool {
+        quality == other.quality && fps == other.fps && dynamicRange == other.dynamicRange
+            && frontCamera == other.frontCamera && rearLens == other.rearLens
+            && microphoneEnabled == other.microphoneEnabled && captureMode == other.captureMode
+            && livePhotoEnabled == other.livePhotoEnabled
+    }
+}
+
+enum CaptureLoad: Int, Sendable {
+    case normal, elevated, critical
+    var warning: String? {
+        switch self {
+        case .normal: return nil
+        case .elevated: return "温度或相机负载偏高，建议降低帧率"
+        case .critical: return "温度或相机负载过高，请等待设备恢复"
         }
     }
 }
