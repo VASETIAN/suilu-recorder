@@ -20,6 +20,8 @@ jobs:
         run: python3 tools/check_video_modes.py
       - name: Check capture lifecycle and error recovery
         run: python3 tools/check_lifecycle.py
+      - name: Check dual-camera video composition and save
+        run: python3 tools/check_dual_capture.py
       - name: Check browser masks and scrolling in WebKit
         run: python3 tools/check_browser_layout.py
       - name: Build unsigned iPhoneOS App

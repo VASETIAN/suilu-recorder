@@ -46,17 +46,21 @@ assert(migrated.recovery == .longPress && migrated.livePhotoEnabled)
 assert(migrated.rearLens == .automatic)
 assert(!migrated.resumeAfterBackground && !migrated.automaticallyExportToPhotos)
 assert(migrated.thermalProtection && migrated.hapticFeedback)
-assert(migrated.interfaceMode == .camera && migrated.obscureAppSwitcher)
+assert(migrated.interfaceMode == .camera && migrated.obscureAppSwitcher && !migrated.dualCapture)
 var new = migrated
 new.fps = 120; new.dynamicRange = .hdr; new.rearLens = .telephoto
 new.resumeAfterBackground = true; new.automaticallyExportToPhotos = true
 new.thermalProtection = false; new.hapticFeedback = false
+new.dualCapture = true
 new.interfaceMode = .browser; new.obscureAppSwitcher = false; new.captureMode = .video; new.save()
 assert(RecorderSettings.load() == new)
 var preferenceOnly = new
 preferenceOnly.resumeAfterBackground.toggle(); preferenceOnly.hapticFeedback.toggle()
 preferenceOnly.interfaceMode = .camera; preferenceOnly.obscureAppSwitcher.toggle()
 assert(preferenceOnly.hasSameCaptureConfiguration(as: new))
+preferenceOnly.dualCapture.toggle()
+assert(!preferenceOnly.hasSameCaptureConfiguration(as: new))
+preferenceOnly.dualCapture.toggle()
 preferenceOnly.fps = 30
 assert(!preferenceOnly.hasSameCaptureConfiguration(as: new))
 new.fps = 999; new.save()
@@ -64,6 +68,7 @@ assert(RecorderSettings.load().fps == 30)
 new.captureMode = .photo; new.save()
 assert(RecorderSettings.load().captureMode == .video) // Browser form always uses movie output.
 
+assert(BrowserAddress.videos.absoluteString == "https://www.douyin.com/" && BrowserAddress.allows(BrowserAddress.videos))
 assert(BrowserAddress.destination("  https://www.xiaoheihe.cn/app/bbs/home  ") == BrowserAddress.community)
 assert(BrowserAddress.destination("example.com/test?q=1")?.absoluteString == "https://example.com/test?q=1")
 let search = URLComponents(url: BrowserAddress.destination("苹果 & 相机 #测试")!, resolvingAgainstBaseURL: false)!

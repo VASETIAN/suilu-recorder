@@ -14,7 +14,6 @@ struct ContentView: View {
     @State private var pendingResumeID: UUID?
     @StateObject private var location = LocationService()
     @StateObject private var brightness = ScreenBrightness()
-    @StateObject private var pictureInPicture = RecorderPictureInPicture()
     @StateObject private var browser = RecorderBrowser()
 
     var body: some View {
@@ -22,7 +21,7 @@ struct ContentView: View {
             let landscape = geometry.size.width > geometry.size.height
             ZStack {
                 Color.black.ignoresSafeArea()
-                CameraPreview(recorder: recorder, pictureInPicture: pictureInPicture,
+                CameraPreview(recorder: recorder,
                               onBlackScreen: { setBlackScreen(true) })
                     .ignoresSafeArea().accessibilityHidden(isBlack || recorder.settings.interfaceMode == .browser)
                 if recorder.settings.interfaceMode == .camera {
@@ -57,7 +56,7 @@ struct ContentView: View {
         .statusBarHidden(isBlack)
         .persistentSystemOverlays(isBlack ? .hidden : .automatic)
         .sheet(isPresented: $showSettings) {
-            SettingsView(recorder: recorder, location: location, pictureInPicture: pictureInPicture)
+            SettingsView(recorder: recorder, location: location)
         }
         .sheet(isPresented: $showLibrary) {
             LibraryView(recorder: recorder)
@@ -149,11 +148,10 @@ struct ContentView: View {
                 Image(systemName: "safari").font(.title3)
                     .frame(width: 44, height: 44).background(.black.opacity(0.35), in: Circle())
             }
-            .disabled(recorder.isConfiguring || (recorder.phase != .idle && recorder.phase != .recording)
-                      || pictureInPicture.isActive || pictureInPicture.isStarting)
+            .disabled(recorder.isConfiguring || (recorder.phase != .idle && recorder.phase != .recording))
             .accessibilityLabel("打开浏览模式")
-            if recorder.settings.captureMode == .video { pictureInPictureButton }
-            else { livePhotoButton }
+            if recorder.settings.captureMode != .video { livePhotoButton }
+            else if recorder.dualCaptureSupported { dualCaptureButton }
             Button(action: recorder.toggleTorch) {
                 Image(systemName: recorder.torchOn ? "flashlight.on.fill" : "flashlight.off.fill")
                     .font(.title3)
@@ -213,24 +211,18 @@ struct ContentView: View {
         .accessibilityValue(enabled ? "已开启" : "已关闭")
     }
 
-    private var pictureInPictureButton: some View {
-        let enabled = pictureInPicture.isActive || pictureInPicture.isStarting
-        return Button {
-            if enabled { pictureInPicture.stop() }
-            else { setBlackScreen(false); pictureInPicture.start() }
-        } label: {
+    private var dualCaptureButton: some View {
+        Button(action: recorder.toggleDualCapture) {
             VStack(spacing: 3) {
-                Image(systemName: enabled ? "pip.exit" : "pip.enter").font(.title3)
-                Text("画中画").font(.system(size: 9, weight: .semibold))
+                Image(systemName: "rectangle.on.rectangle").font(.title3)
+                Text("双摄").font(.system(size: 9, weight: .semibold))
             }
-            .foregroundStyle(enabled ? .yellow : .white)
-            .frame(width: 44, height: 44)
-            .background(.black.opacity(0.35), in: Circle())
+            .foregroundStyle(recorder.settings.dualCapture ? .yellow : .white)
+            .frame(width: 44, height: 44).background(.black.opacity(0.35), in: Circle())
         }
-        .disabled(!pictureInPicture.canStart && !enabled)
-        .opacity(pictureInPicture.canStart || enabled ? 1 : 0.35)
-        .accessibilityLabel(pictureInPicture.isActive ? "关闭画中画" : pictureInPicture.isStarting ? "取消开启画中画" : "开启画中画")
-        .accessibilityHint(pictureInPicture.status)
+        .disabled(!recorder.canConfigure)
+        .accessibilityLabel("前后同步录像")
+        .accessibilityValue(recorder.settings.dualCapture ? "已开启" : "已关闭")
     }
 
     private func footer(landscape: Bool) -> some View {
@@ -269,7 +261,7 @@ struct ContentView: View {
                 captureButton
                 Spacer(minLength: 0)
                 cameraButton(symbol: "arrow.triangle.2.circlepath.camera", title: "翻转",
-                             enabled: recorder.canConfigure && recorder.isReady, action: recorder.switchCamera)
+                             enabled: recorder.canConfigure && recorder.isReady && !recorder.settings.dualCapture, action: recorder.switchCamera)
             }
             .frame(maxWidth: 400)
             Text(recorder.phase == .recording ? "\(recorder.settings.microphoneEnabled ? "有声" : "无声")录像 · \(recorder.settings.recovery.title)恢复黑屏"

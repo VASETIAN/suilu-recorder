@@ -7,18 +7,25 @@ from pathlib import Path
 import argparse
 import re
 import subprocess
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def build(output: Path):
-    source = (ROOT / 'Recorder.swiftpm/Sources/BrowserView.swift').read_text(encoding='utf-8')
+def build(output: Path, source_path: Path):
+    source = source_path.read_text(encoding='utf-8')
     script = re.search(r'let mobileCommunity = """\n(.*?)\n        """', source, re.S).group(1)
     script = script.replace("location.hostname === 'www.xiaoheihe.cn' || location.hostname === 'xiaoheihe.cn'", 'true')
     # The removed desktop header still had this fixed 146px mask above the feed.
     css = '''*{box-sizing:border-box}body{margin:0;font:16px system-ui}#app{min-width:800px}#app>nav{height:64px}#app>main{padding:0 12px}#page-bbs-community{width:1032px;margin:auto;padding:16px 0}#page-bbs-community:before{content:"";display:block;position:fixed;top:0;width:100%;height:146px;background:#f7f8f9;z-index:5}#page-bbs-community:after{content:"";display:block;position:fixed;bottom:0;width:100%;height:22px;background:#f7f8f9;z-index:5}.content{display:flex}.list{width:660px}.list:before{content:"";display:block;position:sticky;top:138px;height:8px;background:white;z-index:10}.list:after{content:"";display:block;position:sticky;bottom:16px;height:8px;background:white;z-index:10}.right{width:356px}.hb-cpt__pagination-outer{overflow:hidden}.hb-cpt__pagination-inner{display:flex;width:800px}.bbs-home__topic-item{flex-shrink:0}.bbs-home__content-list{padding:0 16px}.bbs-home__content-item{position:relative;margin-bottom:4px}.hb-bbs-home__feed-splitline:after{content:"";position:absolute;top:100%;left:-28px;width:calc(100% + 56px);height:4px;background:#eee}.hb-cpt__bbs-list-content{display:block;padding:12px;background:white}.bbs-content__title{margin:0 0 12px}.bbs-content__imgs-wrapper{position:relative;height:190px}.bbs-content__image{position:absolute;width:190px;height:190px;left:0;background:#d6dde2}'''
     topics = ''.join(f'<button class="bbs-home__topic-item"><span class="bbs-home__topic-item-icon" style="display:block;background:#ddd"></span>社区 {i}</button>' for i in range(8))
-    cards = ''.join('<div class="bbs-home__content-item hb-bbs-home__feed-splitline"><a class="hb-cpt__bbs-list-content"><h2 class="bbs-content__title">Test post</h2><div class="bbs-content__imgs-wrapper"><div class="bbs-content__image"></div></div></a></div>' for _ in range(8))
+    css += '.hb-cpt__image{overflow:hidden}.hb-cpt__image-elem{position:relative;width:100%;height:100%;object-fit:cover}.bbs-content__image-cnt{position:absolute;left:578px;top:0}'
+    tall = 'data:image/svg+xml,' + quote('<svg xmlns="http://www.w3.org/2000/svg" width="200" height="1800"><rect width="200" height="1800" fill="#adc"/></svg>')
+    cards = ''
+    for count in [1, 2, 3, 1, 2, 3]:
+        images = ''.join(f'<div class="hb-cpt__image bbs-content__image" style="left:{i*194}px;width:190px;height:190px"><img class="hb-cpt__image-elem" src="{tall}"></div>' for i in range(count))
+        badge = '<div class="bbs-content__image-cnt">+5</div>' if count == 3 else ''
+        cards += '<div class="bbs-home__content-item hb-bbs-home__feed-splitline"><a class="hb-cpt__bbs-list-content"><h2 class="bbs-content__title">Test post</h2><div class="bbs-content__imgs-wrapper" style="height:190px">'+images+badge+'</div></a></div>'
     html = '<!doctype html><html><head><style>'+css+'</style></head><body><div id="app"><nav>Desktop navigation</nav><main><section id="page-bbs-community"><div class="bbs-community__search-module">Search</div><div class="content"><main class="list"><div class="hb-bbs-home"><div class="bbs-home__topic-list-wrapper"><div class="hb-cpt__pagination bbs-home__topic-list"><div class="hb-cpt__pagination-outer"><div class="hb-cpt__pagination-inner">'+topics+'</div></div></div></div><div class="bbs-home__content-list">'+cards+'</div></div></main><aside class="right">Sidebar</aside></div></section></main></div></body></html>'
     swift = r'''
 import Cocoa
@@ -72,7 +79,17 @@ final class LayoutCheck: NSObject, WKNavigationDelegate {
                 width: document.documentElement.clientWidth,
                 scrollWidth: document.documentElement.scrollWidth,
                 firstPostY: document.querySelector('.bbs-home__content-item').getBoundingClientRect().y,
-                topicCanBeTapped: hit?.closest('.bbs-home__topic-item') === topic
+                topicCanBeTapped: hit?.closest('.bbs-home__topic-item') === topic,
+                imagesFit: Array.from(document.querySelectorAll('.bbs-content__imgs-wrapper')).every(w => {
+                    const boxes = Array.from(w.querySelectorAll(':scope > .bbs-content__image'));
+                    return boxes.every((e, i) => {
+                        const r = e.getBoundingClientRect(), img = e.querySelector('img').getBoundingClientRect();
+                        const previous = boxes[i - 1]?.getBoundingClientRect();
+                        return r.width > 0 && Math.abs(r.height / r.width - (boxes.length === 1 ? 0.75 : 1)) < 0.03
+                            && Math.abs(img.width - r.width) < 1 && Math.abs(img.height - r.height) < 1
+                            && (!previous || r.left >= previous.right + 4);
+                    });
+                })
             };
         })()
         """
@@ -80,7 +97,7 @@ final class LayoutCheck: NSObject, WKNavigationDelegate {
             guard error == nil, let values = result as? [String: Any],
                   let width = values["width"] as? Int, let scrollWidth = values["scrollWidth"] as? Int,
                   ["pageMask", "bottomMask", "listMask", "listBottomMask"].allSatisfy({ values[$0] as? String == "none" }),
-                  scrollWidth <= width + 1 else { self.fail("Masks or overflow: \(String(describing: result)), \(String(describing: error))"); return }
+                  scrollWidth <= width + 1, values["imagesFit"] as? Bool == true else { self.fail("Masks, stretched/overlapping images or overflow: \(String(describing: result)), \(String(describing: error))"); return }
             if !scrolled {
                 guard values["topicCanBeTapped"] as? Bool == true,
                       let y = values["firstPostY"] as? Double, y < 120 else { self.fail("Top content is covered: \(values)"); return }
@@ -89,7 +106,7 @@ final class LayoutCheck: NSObject, WKNavigationDelegate {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.check(scrolled: true) }
                 }
             } else {
-                print("PASS: production WebKit adapter at \(self.widths[self.index])px removes the fixed masks, keeps categories tappable and avoids overflow before/after scrolling")
+                print("PASS: production WebKit adapter at \(self.widths[self.index])px keeps 1/2/3 tall-image thumbnails bounded and separated, categories tappable and avoids masks/overflow before/after scrolling")
                 self.index += 1
                 if self.index == self.widths.count { exit(0) }
                 self.run()
@@ -113,7 +130,8 @@ if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('--output', type=Path, default=ROOT / 'build/browser-layout-check.swift')
     p.add_argument('--generate-only', action='store_true')
+    p.add_argument('--source', type=Path, default=ROOT / 'Recorder.swiftpm/Sources/BrowserView.swift')
     args = p.parse_args()
-    build(args.output)
+    build(args.output, args.source)
     if not args.generate_only:
         subprocess.run(['swift', str(args.output)], check=True)

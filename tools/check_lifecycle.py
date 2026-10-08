@@ -27,7 +27,7 @@ def build(controller: Path, output: Path):
     view = (ROOT / 'Recorder.swiftpm/Sources/ContentView.swift').read_text(encoding='utf-8')
     settings_view = (ROOT / 'Recorder.swiftpm/Sources/SettingsView.swift').read_text(encoding='utf-8')
     phase = extract(settings, 'enum RecordingPhase:')
-    pip = extract(settings, 'enum CameraPiPState:')
+    pip = ''
     methods = [extract(source, s) for s in (
         'func sceneChanged(', 'func setInterfaceMode(', 'private func finishCaptureStateOnQueue()',
         'private func setPhase(', 'private func stopOnQueue(',
@@ -38,13 +38,7 @@ def build(controller: Path, output: Path):
     else:
         # Existing interruption-ended observer uses this same published-state guard.
         assert 'if self.phase == .idle { self.start() }' in source
-    if 'func setPictureInPictureState(' in source:
-        methods += [extract(source, 'func setPictureInPictureState('),
-                    extract(source, 'private var canContinueInPictureInPicture:'),
-                    extract(source, 'private func tick()')]
-    else:
-        methods.append('func setPictureInPictureState(_ value: CameraPiPState) {}')
-        methods.append('private func tick() {}')
+    methods.append(extract(source, 'private func tick()'))
     harness = r'''
 import Foundation
 enum ScenePhase { case active, inactive, background }
@@ -94,17 +88,23 @@ final class ReplayMovie {
     var recordedDuration: Double = 1
     func stopRecording() { isRecording = false }
 }
+final class ReplayDual {
+    let session = ReplaySession()
+    var elapsed: Double = 3
+    var stops = 0
+    func stop() { stops += 1 }
+}
 final class Recorder: @unchecked Sendable {
     let captureQueue = ReplayQueue(), uiQueue = ReplayQueue()
     let session = ReplaySession(), movieOutput = ReplayMovie()
+    var activeSession: ReplaySession { dualRecorder?.session ?? session }
+    var dualRecorder: ReplayDual?
+
     var phase: RecordingPhase = .idle, capturePhase: RecordingPhase = .idle
     var configured = true, foreground = true, mainForeground = true
     var runtimeRecoveryAttempted = false
     var isReady = true, isConfiguring = false, startTaskRunning = false
     var stopRequested = false, permissionGeneration = 0
-    var pictureInPictureState: CameraPiPState = .inactive
-    var pictureInPictureDeadline: TimeInterval = 0
-    var onStopPictureInPicture: (() -> Void)?
     var finishingTask = false
     var tickCount = 0, elapsed: Double = 0
     var availableSpace: Int64?
@@ -237,69 +237,33 @@ func recordingRecorder(supported: Bool = true, enabled: Bool = true) -> Recorder
     value.session.isMultitaskingCameraAccessEnabled = enabled
     return value
 }
-// Eligibility alone never grants continuity: an explicit native PiP request is required.
+// Foreground recording always finishes when the app enters the background.
 let noRequest = recordingRecorder()
 noRequest.sceneChanged(.background); noRequest.pump()
 assert(noRequest.capturePhase == .finishing && !noRequest.session.isRunning)
-let allowed = recordingRecorder()
-allowed.setPictureInPictureState(.active); allowed.pump()
-allowed.sceneChanged(.background); allowed.pump()
-guard allowed.capturePhase == .recording && allowed.session.isRunning else {
-    print("FAIL: eligible, explicitly active PiP is stopped on background entry")
-    exit(2)
-}
-assert(!allowed.isReady && !allowed.finishingTask)
-// Closing the background window stops once and keeps the finite save task.
-allowed.setPictureInPictureState(.inactive); allowed.pump()
-assert(allowed.capturePhase == .finishing && !allowed.session.isRunning && allowed.finishingTask)
-allowed.completedFile(); allowed.uiQueue.drain()
-assert(allowed.capturePhase == .idle && !allowed.session.isRunning && !allowed.finishingTask)
-// A late successful delegate callback cannot resurrect finished capture.
-allowed.setPictureInPictureState(.active); allowed.pump()
-assert(allowed.pictureInPictureState == .inactive && allowed.capturePhase == .idle && !allowed.session.isRunning)
-let returned = recordingRecorder()
-returned.setPictureInPictureState(.active); returned.pump()
-returned.sceneChanged(.background); returned.pump()
-returned.sceneChanged(.active); returned.pump()
-assert(returned.isReady && returned.capturePhase == .recording)
-returned.setPictureInPictureState(.inactive); returned.pump()
-assert(returned.capturePhase == .recording && returned.session.isRunning)
-// Support, enablement and session interruption are independent requirements.
-for value in [recordingRecorder(supported: false), recordingRecorder(enabled: false)] {
-    value.setPictureInPictureState(.active); value.pump()
-    value.sceneChanged(.background); value.pump()
-    assert(value.capturePhase == .finishing && !value.session.isRunning)
-}
-let interrupted = recordingRecorder()
-interrupted.setPictureInPictureState(.active); interrupted.pump()
-interrupted.session.isInterrupted = true
-interrupted.sceneChanged(.background); interrupted.pump()
-assert(interrupted.capturePhase == .finishing && !interrupted.session.isRunning)
-// Only a bounded start transition can bridge foreground loss. Confirmation ends
-// the finite background task, so it cannot stop valid PiP at the task timeout.
-let transition = recordingRecorder()
-transition.setPictureInPictureState(.starting); transition.pump()
-transition.sceneChanged(.background); transition.pump()
-assert(transition.capturePhase == .recording && transition.finishingTask)
-transition.setPictureInPictureState(.active); transition.pump()
-assert(transition.capturePhase == .recording && !transition.finishingTask)
-let expired = recordingRecorder()
-expired.setPictureInPictureState(.starting); expired.pump()
-expired.sceneChanged(.background); expired.pump()
-assert(expired.capturePhase == .recording)
-expired.pictureInPictureDeadline = ProcessInfo.processInfo.systemUptime - 1
-expired.fireTimer(); expired.pump()
-assert(expired.capturePhase == .finishing && !expired.session.isRunning)
 let lowSpace = recordingRecorder()
-lowSpace.setPictureInPictureState(.active); lowSpace.pump()
-lowSpace.sceneChanged(.background); lowSpace.pump()
 RecorderFiles.freeBytes = 512
 lowSpace.fireTimer(); lowSpace.pump()
 assert(lowSpace.capturePhase == .finishing && !lowSpace.movieOutput.isRecording && lowSpace.finishingTask)
-lowSpace.completedFile(); lowSpace.uiQueue.drain()
-assert(lowSpace.capturePhase == .idle && !lowSpace.session.isRunning && !lowSpace.finishingTask)
 RecorderFiles.freeBytes = 1024
-print("PASS: PiP continuity, close/save, foreground return, capability denial, interruption, late callback, bounded transition and low-space save")
+print("PASS: foreground-only stop/save and low-space protection after PiP removal")
+let dualBackground = recordingRecorder()
+dualBackground.dualRecorder = ReplayDual()
+dualBackground.sceneChanged(.background); dualBackground.pump()
+assert(dualBackground.capturePhase == .finishing && dualBackground.dualRecorder!.stops == 1)
+assert(!dualBackground.dualRecorder!.session.isRunning)
+dualBackground.completedFile(); dualBackground.pump()
+dualBackground.sceneChanged(.active); dualBackground.pump()
+assert(dualBackground.isReady && dualBackground.dualRecorder!.session.isRunning)
+let dualLowSpace = recordingRecorder()
+dualLowSpace.dualRecorder = ReplayDual()
+dualLowSpace.fireTimer(); dualLowSpace.pump()
+assert(dualLowSpace.elapsed == 3)
+RecorderFiles.freeBytes = 512
+dualLowSpace.fireTimer(); dualLowSpace.pump()
+assert(dualLowSpace.dualRecorder!.stops == 1 && dualLowSpace.capturePhase == .finishing)
+RecorderFiles.freeBytes = 1024
+print("PASS: production dual-backend routing stops on background/low space, reports its duration and restores readiness on return")
 let underlying = NSError(domain: "CameraDevice", code: -16800,
     userInfo: [NSLocalizedFailureReasonErrorKey: "Format unavailable"])
 let cameraError = NSError(domain: AVFoundationErrorDomain, code: -11800,
@@ -365,12 +329,6 @@ for inactiveMode in ["photo", "livePhoto"] {
     photo.sceneChanged(.active); photo.pump()
     assert(photo.resumeRequests.isEmpty)
 }
-let continuedPiP = recordingRecorder()
-continuedPiP.captureSettings.resumeAfterBackground = true
-continuedPiP.setPictureInPictureState(.active); continuedPiP.pump()
-continuedPiP.sceneChanged(.background); continuedPiP.pump()
-continuedPiP.sceneChanged(.active); continuedPiP.pump()
-assert(continuedPiP.capturePhase == .recording && continuedPiP.resumeRequests.isEmpty)
 let interruptedResume = recordingRecorder()
 interruptedResume.captureSettings.resumeAfterBackground = true
 interruptedResume.sceneChanged(.background); interruptedResume.pump()
@@ -395,7 +353,7 @@ let unprotected = recordingRecorder()
 unprotected.captureSettings.thermalProtection = false
 unprotected.setLoad(.critical); unprotected.pump()
 assert(unprotected.capturePhase == .recording && unprotected.movieOutput.isRecording)
-print("PASS: default-off resume, both save/return orders, one request, failed saves, photo/PiP exclusions, interruption and thermal protection")
+print("PASS: default-off resume, both save/return orders, one request, failed saves, photo exclusions, interruption and thermal protection")
 struct ReplayLocation { func snapshot() -> String? { "current location" } }
 final class ReplayView {
     let recorder = Recorder(), location = ReplayLocation()

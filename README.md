@@ -1,23 +1,21 @@
 # 畅游 Recorder
 
-个人拍摄与浏览工具：录像、照片、Live Photo、内置图库、拍摄位置、前台浏览录像、任务切换器隐私遮罩和系统允许时的正常可见画中画。
+个人拍摄与浏览工具：录像、照片、Live Photo、内置图库、位置、前台浏览录像和任务切换器隐私遮罩。Recorder.swiftpm 可直接在 iPad Swift Playgrounds 打开，最低 iOS／iPadOS 16。
 
-`Recorder.swiftpm` 可直接在 iPad Swift Playgrounds 打开。设备的相机、帧率、镜头、Live Photo 和多任务相机能力均需实际检测；保留系统隐私指示。关闭或收起后台画中画、锁屏和系统中断时停止并保存。
+1.4.3 修复真实嵌套长图撑开社区缩略图的问题。底部为社区／视频／设置，视频默认打开抖音官方网页，顶栏搜索及菜单保留。网页来自公开网站，不是第三方原生客户端；网站登录与播放能力需实际核对。录制由本人在设置中开始、查看计时和停止。
 
-## 免费 iPhone 构建
+新增默认关闭的前后同步录像：Apple AVCaptureMultiCamSession 获取后置主摄＋前置画面，Core Image 合成大画面与左上角小画面，AVAssetWriter 编码一个带声音的视频。双摄提供设备支持的 720p／1080p、24／30fps、SDR，并检查资源预算；单摄原有 HDR、长焦及设备支持的 4K120 保留。拍照与 Live Photo 使用单摄。
 
-GitHub Actions 使用标准 macOS 环境和 Xcode，编译此仓库中的实际 Swift 源文件，输出真正的 arm64 iPhoneOS App 和 unsigned IPA。云端不需要 Apple 账户、密码或签名证书。
+移除无法可靠使用的画中画及背景音频声明。返回主屏幕会停止保存，可选的返回后分段恢复仍默认关闭；没有离开期间的画面。保留系统隐私指示和后台相机限制。不卸载旧 App，用同一 Apple 账号覆盖升级保留内置图库。
 
-Actions → Build iPhone App → 选择成功的运行 → 下载 Recorder-iPhone-unsigned。
+## iPhone 构建
 
-将 IPA 下载到 Windows 后，可通过 iLoader 用自己的免费 Apple 账户签名并安装。免费签名有效 7 天，需要刷新；手机须支持开发者模式并信任自己的开发者证书。未签名 IPA 不能直接安装。真机拍摄、保存与画中画结果需设备验证。
+GitHub Actions 用 Xcode 26.3 与实际 iPhoneOS SDK 编译全部 Swift 文件、图标、App Intents 和原生控制中心扩展，输出真实 arm64 未签名 IPA；云端不需要 Apple 账号或证书。
 
-源码公开以使用 GitHub 公共仓库的免费标准运行环境。构建产物仅保留 3 天，可重新触发构建；应用录制内容保存在设备中，不进入本仓库。
+Actions → Build iPhone App → 成功运行 → 下载 Recorder-iPhone-unsigned。Windows 可在 iLoader 中用自己的免费 Apple 账号签名安装；密码与验证码由本人输入，免费签名通常需每 7 天刷新。未签名 IPA 不能直接安装。
 
-完整功能及导入说明见 [工程 README](Recorder.swiftpm/README.md)。
+源码公开以使用公共仓库的免费标准 macOS 构建环境，产物保留 3 天，可重新触发；设备拍摄内容不进入仓库。SDK 编译、合成文件和桌面 WebKit 检查不能代替 iPhone 的拍摄、性能、音频及网页测试。
 
-1.4.2 修复公开社区网页遗留的固定 146px 顶部遮罩与列表遮罩，避免分类和帖子被挡住，并修正分隔线导致的横向溢出。浏览界面统一为浅色，底部为社区／浏览／设置，网页返回、前进和刷新在顶栏菜单中；外部网址显示域名。录像仍在设置中手动开始、计时和停止。新增 macOS WebKit 渲染检查覆盖真实故障样式与生产适配脚本，在不同宽度下检查分类可点、无遮罩、无横向溢出及滚动。小黑盒内容来自公开网页，不是其原生 App。
+安装版包含 iOS 18+ 原生控制中心扩展，打开 App 一次后在「添加控制」中搜索「畅游」。Controls/ 保存扩展源文件；Swift Playgrounds 的 .swiftpm 本身仅运行 App，不能安装扩展。
 
-设置中的“开始录像并返回浏览”先应用参数，等待实际录制开始后再关闭设置；失败、离开后台或取消等待时不留下延后启动请求。任务切换器遮罩默认开启，前台截图可用。沿用点击对焦、返回恢复、保存／导出、高负载保护和图库功能。替身会话、合成文件与桌面 WebKit 渲染均不代替真机测试。
-
-安装版包含原生控制中心扩展，iOS 18 及以上在控制中心「添加控制」中搜索「畅游」。`Controls/` 是扩展源文件，`tools/generate_project.py` 创建含 App 与扩展的原生项目；Swift Playgrounds 的 `.swiftpm` 本身仅运行 App，不能安装这个扩展。
+详细说明见 [工程 README](Recorder.swiftpm/README.md)。

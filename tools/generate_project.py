@@ -50,7 +50,7 @@ def generate():
                             ('locationWhenInUse', 'NSLocationWhenInUseUsageDescription')]:
         info[key] = re.search(r'\.' + capability + r'\(purposeString:\s*"([^"]+)"', manifest).group(1)
     info.update(plistlib.loads((PACKAGE / 'AdditionalInfo.plist').read_bytes()))
-    assert info['UIBackgroundModes'] == ['audio']
+    assert 'UIBackgroundModes' not in info
     config = ROOT / 'Config'
     config.mkdir(exist_ok=True)
     (config / 'Info.plist').write_bytes(plistlib.dumps(info))

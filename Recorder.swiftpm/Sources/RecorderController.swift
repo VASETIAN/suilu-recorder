@@ -40,8 +40,27 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     @Published var shareExport: MediaExport?
     private var preparedShare: MediaExport?
     private var failedPhotosExports = 0
-    // Main-queue callback owned by the visible PiP presentation.
-    var onStopPictureInPicture: (() -> Void)?
+    @Published private(set) var dualPreview: DualCameraCapture?
+    let dualCaptureModes = DualCameraCapture.modes
+    var dualCaptureSupported: Bool { !dualCaptureModes.isEmpty }
+    private var dualRecorder: DualCameraCapture?
+    private var activeSession: AVCaptureSession { dualRecorder?.session ?? session }
+
+    func attachDualPreview(_ back: AVCaptureVideoPreviewLayer, _ face: AVCaptureVideoPreviewLayer) {
+        captureQueue.async {
+            guard let dual = self.dualRecorder, back.session !== dual.session || face.session !== dual.session else { return }
+            dual.attachPreview(back, face)
+            self.publish { self.objectWillChange.send() }
+        }
+    }
+
+    func toggleDualCapture() {
+        guard canConfigure, dualCaptureSupported else { return }
+        var value = settings
+        value.dualCapture.toggle()
+        value.captureMode = .video
+        apply(value)
+    }
 
     // All capture state and AVFoundation mutations belong to this serial queue.
     // Published UI state is changed only on the main queue.
@@ -57,8 +76,6 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     private var capturePhase: RecordingPhase = .idle
     private var configured = false
     private var foreground = false
-    private var pictureInPictureState: CameraPiPState = .inactive
-    private var pictureInPictureDeadline: TimeInterval = 0
     private var stopRequested = false
     private var activeURL: URL?
     private var zoomScale: CGFloat = 1
@@ -165,7 +182,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                 self.runtimeRecoveryAttempted = false
                 // The UI phase can lag behind an already completed file callback.
                 // Reconcile on the queue that owns capture state as well.
-                if self.capturePhase == .recording && self.session.isRunning && !self.session.isInterrupted {
+                if self.capturePhase == .recording && self.activeSession.isRunning && !self.activeSession.isInterrupted {
                     self.publish { self.isReady = true; self.status = "录像中" }
                 } else if self.configured { self.resumeSessionOnQueue() }
                 else { self.publish { self.start() } }
@@ -178,12 +195,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             if phase.blocksConfiguration { beginFinishingTask() }
             captureQueue.async {
                 self.foreground = false
-                if self.canContinueInPictureInPicture {
-                    self.resumeAfterBackgroundPending = false
-                    if self.pictureInPictureState == .active { self.endFinishingTask() }
-                    self.publish { self.status = "画中画录像中" }
-                    return
-                }
+
                 self.resumeAfterBackgroundPending = self.captureSettings.resumeAfterBackground
                     && self.captureSettings.captureMode == .video
                     && (self.capturePhase == .preparing || self.capturePhase == .recording)
@@ -192,7 +204,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                 if self.capturePhase == .preparing || self.capturePhase == .recording {
                     self.stopOnQueue(reason: "离开前台，已停止录像", preserveResume: true)
                 }
-                if self.session.isRunning { self.session.stopRunning() }
+                if self.activeSession.isRunning { self.activeSession.stopRunning() }
                 self.publish { self.isReady = false }
             }
         }
@@ -200,34 +212,9 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         // notification handles a system interruption without canceling these prompts.
     }
 
-    func setPictureInPictureState(_ value: CameraPiPState) {
-        if value == .inactive && !mainForeground && phase.blocksConfiguration { beginFinishingTask() }
-        captureQueue.async {
-            self.pictureInPictureState = value
-            self.pictureInPictureDeadline = value == .starting ? ProcessInfo.processInfo.systemUptime + 5 : 0
-            // Only a real, already running video capture may continue in PiP.
-            if value != .inactive && !self.canContinueInPictureInPicture {
-                self.pictureInPictureState = .inactive
-                self.publish { self.onStopPictureInPicture?() }
-            }
-            if value == .active && !self.foreground && self.canContinueInPictureInPicture {
-                self.endFinishingTask()
-            }
-            if !self.foreground && !self.canContinueInPictureInPicture {
-                self.stopOnQueue(reason: "画中画已结束，正在保存…")
-                if self.session.isRunning { self.session.stopRunning() }
-                self.publish { self.isReady = false }
-            }
-        }
-    }
 
-    private var canContinueInPictureInPicture: Bool {
-        let presenting = pictureInPictureState == .active
-            || (pictureInPictureState == .starting && ProcessInfo.processInfo.systemUptime <= pictureInPictureDeadline)
-        return presenting && capturePhase == .recording && configured
-            && session.isMultitaskingCameraAccessSupported && session.isMultitaskingCameraAccessEnabled
-            && session.isRunning && !session.isInterrupted
-    }
+
+
 
     func apply(_ value: RecorderSettings, displayedZoom: CGFloat? = nil) {
         guard canConfigure else { return }
@@ -280,6 +267,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     }
 
     func switchCamera() {
+        guard !settings.dualCapture else { return }
         var value = settings
         value.frontCamera.toggle()
         apply(value)
@@ -294,8 +282,8 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             }
             do {
                 let applied = try self.configureOnQueue(requested, displayedZoom: displayedZoom)
-                if !self.session.isRunning { self.session.startRunning() }
-                let running = self.session.isRunning && !self.session.isInterrupted
+                if !self.activeSession.isRunning { self.activeSession.startRunning() }
+                let running = self.activeSession.isRunning && !self.activeSession.isInterrupted
                 self.publish {
                     self.settings = applied
                     applied.save()
@@ -306,7 +294,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                 self.publishCapabilities()
                 self.readCaptureLoadOnQueue()
             } catch {
-                let ready = self.configured && self.session.isRunning && !self.session.isInterrupted
+                let ready = self.configured && self.activeSession.isRunning && !self.activeSession.isInterrupted
                 self.publish {
                     self.isConfiguring = false
                     self.isReady = ready
@@ -320,6 +308,41 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         guard Self.hasPurposeString("NSCameraUsageDescription"),
               AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
             throw RecorderError("相机权限未准备好，请允许相机权限后重试。")
+        }
+        if dualRecorder != nil || requested.dualCapture {
+            let previous = captureSettings
+            turnTorchOff()
+            if activeSession.isRunning { activeSession.stopRunning() }
+            dualRecorder = nil
+            publish { self.dualPreview = nil }
+            session.beginConfiguration()
+            for input in session.inputs { session.removeInput(input) }
+            for output in session.outputs { session.removeOutput(output) }
+            session.commitConfiguration()
+            videoInput = nil; audioInput = nil; pressureObserver = nil; configured = false
+            if requested.dualCapture && requested.captureMode == .video {
+                do {
+                    let dual = DualCameraCapture(queue: captureQueue)
+                    let mode = try dual.configure(mode: requested.mode, audio: requested.microphoneEnabled)
+                    var applied = requested
+                    applied.quality = mode.quality; applied.fps = mode.fps; applied.dynamicRange = .sdr
+                    applied.frontCamera = false; applied.rearLens = .automatic
+                    videoInput = dual.rearInput; zoomScale = 1
+                    dualRecorder = dual; captureSettings = applied; configured = true
+                    publish { self.dualPreview = dual }
+                    if mode != requested.mode {
+                        publish { self.showMessage("双摄录像格式", "已使用设备支持的 \(mode.title)。关闭双摄后可重新选择单摄的高画质与高帧率。") }
+                    }
+                    return applied
+                } catch {
+                    var fallback = previous
+                    fallback.dualCapture = false
+                    let restored = try configureOnQueue(fallback)
+                    let detail = error.localizedDescription
+                    publish { self.showMessage("双摄暂不可用", detail + " 已恢复单摄，可以继续拍摄。") }
+                    return restored
+                }
+            }
         }
         guard let device = Self.camera(front: requested.frontCamera,
                                       mode: requested.captureMode == .video ? requested.mode : nil,
@@ -618,17 +641,17 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         guard let device = videoInput?.device else { return }
         let candidates = captureSettings.rearLens == .telephoto && !captureSettings.frontCamera
             ? [device] : Self.cameras(front: captureSettings.frontCamera)
-        let modes = Array(Set(candidates.flatMap { Self.modes(for: $0) }))
+        let modes = dualRecorder != nil ? dualCaptureModes : Array(Set(candidates.flatMap { Self.modes(for: $0) }))
             .sorted { ($0.quality.width, $0.fps, $0.dynamicRange.rawValue) < ($1.quality.width, $1.fps, $1.dynamicRange.rawValue) }
         let limits = zoomLimits(device)
         let low = limits.lowerBound / zoomScale
         let high = limits.upperBound / zoomScale
         let current = device.videoZoomFactor / zoomScale
-        let telephoto = captureSettings.frontCamera ? nil : Self.telephotoBase()
+        let telephoto = captureSettings.frontCamera || captureSettings.dualCapture ? nil : Self.telephotoBase()
         var shortcutMinimum = low
         var shortcutMaximum = high
         var shortcutTelephoto = telephoto
-        if !capturePhase.blocksConfiguration && !captureSettings.frontCamera {
+        if !capturePhase.blocksConfiguration && !captureSettings.frontCamera && !captureSettings.dualCapture {
             if captureSettings.rearLens == .telephoto,
                let automatic = Self.camera(front: false, mode: captureSettings.captureMode == .video ? captureSettings.mode : nil) {
                 shortcutMinimum = automatic.minAvailableVideoZoomFactor / Self.displayZoomScale(automatic)
@@ -639,7 +662,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         }
         let stops = CameraZoom.stops(minimum: Double(shortcutMinimum), maximum: Double(shortcutMaximum),
                                     telephoto: shortcutTelephoto.map { Double($0) }).map { CGFloat($0) }
-        let label = Self.lensLabel(device)
+        let label = dualRecorder != nil ? "前后双摄" : Self.lensLabel(device)
         let torchAvailable = device.hasTorch && device.isTorchAvailable
         let on = device.torchMode == .on
         let supportsLive = self.captureSettings.captureMode != .video && self.photoOutput.isLivePhotoCaptureSupported
@@ -658,7 +681,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
 
     func selectZoom(_ value: CGFloat) {
         guard isReady, !isConfiguring else { return }
-        if canConfigure && !settings.frontCamera {
+        if canConfigure && !settings.frontCamera && !settings.dualCapture {
             let wantsTelephoto = Self.telephotoBase().map { value >= $0 - 0.01 } ?? false
             let lens: RearCameraLens = wantsTelephoto ? .telephoto : .automatic
             if lens != settings.rearLens {
@@ -751,7 +774,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
 
     private func startRecordingOnQueue(location: CaptureLocation?, resumedFrom: UUID?) {
         resumeAfterBackgroundPending = false
-        guard foreground, configured, session.isRunning, !session.isInterrupted,
+        guard foreground, configured, activeSession.isRunning, !activeSession.isInterrupted,
               capturePhase == .idle else {
             setPhase(.idle)
             report("暂时无法录像", "请确认 App 在前台，并等待相机恢复。")
@@ -789,6 +812,20 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             let url = folder.appendingPathComponent("video.mov")
             movieOutput.metadata = location?.movieMetadata ?? []
             activeItem = item
+            if let dual = dualRecorder {
+                activeURL = url
+                stopRequested = false
+                setPhase(.preparing)
+                publish { self.elapsed = 0; self.status = "正在开始双摄录像…" }
+                dual.start(url: url, orientation: orientation, metadata: location?.movieMetadata ?? [], began: { [weak self] in
+                    guard let self else { return }
+                    self.fileOutput(self.movieOutput, didStartRecordingTo: url, from: [])
+                }, finished: { [weak self] url, error in
+                    guard let self else { return }
+                    self.fileOutput(self.movieOutput, didFinishRecordingTo: url, from: [], error: error)
+                })
+                return
+            }
             guard let connection = movieOutput.connection(with: .video), connection.isActive else {
                 throw RecorderError("摄像头输出暂未就绪，请稍后重试。")
             }
@@ -823,7 +860,8 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         stopRequested = true
         setPhase(.finishing)
         publish { self.status = reason; self.captureFeedback(.stopped) }
-        if movieOutput.isRecording { movieOutput.stopRecording() }
+        if let dual = dualRecorder { dual.stop() }
+        else if movieOutput.isRecording { movieOutput.stopRecording() }
     }
 
     func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL,
@@ -831,7 +869,8 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         captureQueue.async {
             if self.stopRequested || !self.foreground {
                 self.setPhase(.finishing)
-                if self.movieOutput.isRecording { self.movieOutput.stopRecording() }
+                if let dual = self.dualRecorder { dual.stop() }
+                else if self.movieOutput.isRecording { self.movieOutput.stopRecording() }
             } else {
                 self.setPhase(.recording)
                 self.publish { self.status = "录像中"; self.captureFeedback(.began) }
@@ -866,6 +905,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         guard canConfigure else { return }
         var value = settings
         value.captureMode = mode == .video ? .video : value.livePhotoEnabled ? .livePhoto : .photo
+        if mode != .video { value.dualCapture = false }
         apply(value)
     }
 
@@ -879,7 +919,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
 
     private func newItem(kind: CaptureMode, location: CaptureLocation?) -> MediaItem {
         var item = MediaItem(id: UUID(), kind: kind, createdAt: Date(),
-                  camera: videoInput.map { Self.lensLabel($0.device) } ?? "相机",
+                  camera: captureSettings.dualCapture ? "前后双摄" : videoInput.map { Self.lensLabel($0.device) } ?? "相机",
                   resolution: kind == .video ? "\(captureSettings.quality.width) × \(captureSettings.quality.height)" : "待处理",
                   fps: kind == .video ? captureSettings.fps : nil,
                   dynamicRange: kind == .video ? captureSettings.dynamicRange.title : nil,
@@ -898,7 +938,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         status = "正在拍摄…"
         captureQueue.async {
             guard self.foreground, self.configured, self.capturePhase == .idle,
-                  self.session.isRunning, !self.session.isInterrupted,
+                  self.activeSession.isRunning, !self.activeSession.isInterrupted,
                   AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
                 self.finishCaptureStateOnQueue()
                 self.report("暂时无法拍照", "请等待相机恢复后重试。")
@@ -1015,9 +1055,9 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
 
     private func finishCaptureStateOnQueue() {
         setPhase(.idle)
-        if !foreground && session.isRunning { session.stopRunning() }
+        if !foreground && activeSession.isRunning { activeSession.stopRunning() }
         resumeSessionOnQueue()
-        let ready = foreground && session.isRunning && !session.isInterrupted
+        let ready = foreground && activeSession.isRunning && !activeSession.isInterrupted
             && (!captureSettings.thermalProtection || loadOnQueue != .critical)
         publish { self.isReady = ready; self.endFinishingTask() }
     }
@@ -1025,16 +1065,16 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     private func resumeSessionOnQueue() {
         guard foreground, configured, capturePhase == .idle else { return }
         guard !captureSettings.thermalProtection || loadOnQueue != .critical else {
-            if session.isRunning { session.stopRunning() }
+            if activeSession.isRunning { activeSession.stopRunning() }
             publish { self.isReady = false; self.status = "等待设备冷却" }
             return
         }
-        guard !session.isInterrupted else {
+        guard !activeSession.isInterrupted else {
             publish { self.isReady = false; self.status = "等待系统解除相机中断" }
             return
         }
-        if !session.isRunning { session.startRunning() }
-        let ready = session.isRunning && !session.isInterrupted
+        if !activeSession.isRunning { activeSession.startRunning() }
+        let ready = activeSession.isRunning && !activeSession.isInterrupted
         let label = captureSettings.captureMode == .video ? "准备录像" : "准备拍照"
         publish {
             self.isReady = ready
@@ -1169,13 +1209,13 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     private func tick() {
         tickCount += 1
         readCaptureLoadOnQueue()
-        if !foreground && capturePhase == .recording && !canContinueInPictureInPicture {
-            stopOnQueue(reason: "画中画不可用，正在保存…")
-            if session.isRunning { session.stopRunning() }
+        if !foreground && capturePhase == .recording {
+            stopOnQueue(reason: "离开前台，正在保存…")
+            if activeSession.isRunning { activeSession.stopRunning() }
             publish { self.isReady = false }
         }
         if capturePhase == .recording {
-            let value = CMTimeGetSeconds(movieOutput.recordedDuration)
+            let value = dualRecorder?.elapsed ?? CMTimeGetSeconds(movieOutput.recordedDuration)
             publish { self.elapsed = value.isFinite ? max(0, value) : 0 }
         }
         if tickCount % 3 == 0 || capturePhase == .recording {
@@ -1195,10 +1235,10 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
 
     private func readCaptureLoadOnQueue() {
         let thermal = ProcessInfo.processInfo.thermalState
-        let pressure = videoInput?.device.systemPressureState.level ?? .nominal
+        let pressures = [videoInput?.device, dualRecorder?.frontInput?.device].compactMap { $0?.systemPressureState.level }
         let value: CaptureLoad
-        if thermal == .critical || pressure == .critical || pressure == .shutdown { value = .critical }
-        else if thermal == .serious || pressure == .serious { value = .elevated }
+        if thermal == .critical || pressures.contains(.critical) || pressures.contains(.shutdown) { value = .critical }
+        else if thermal == .serious || pressures.contains(.serious) { value = .elevated }
         else { value = .normal }
         updateCaptureLoadOnQueue(value)
     }
@@ -1214,7 +1254,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                 stopOnQueue(reason: "设备负载过高，正在停止并保存…")
                 report("设备需要冷却", "已停止录像并尝试保存。画质和帧率没有被自动改变，请等待设备恢复后再拍摄。")
             } else if capturePhase == .idle {
-                if session.isRunning { session.stopRunning() }
+                if activeSession.isRunning { activeSession.stopRunning() }
                 publish { self.isReady = false; self.status = "等待设备冷却" }
             }
         } else if old == .critical && value != .critical { resumeSessionOnQueue() }
@@ -1247,24 +1287,25 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             guard let self = self else { return }
             if self.phase.blocksConfiguration { self.beginFinishingTask() }
             self.captureQueue.async {
-                self.pictureInPictureState = .inactive
                 self.resumeAfterBackgroundPending = false
                 self.turnTorchOff()
                 self.stopOnQueue(reason: "设备已锁定，正在保存…")
-                if self.session.isRunning { self.session.stopRunning() }
-                self.publish { self.isReady = false; self.onStopPictureInPicture?() }
+                if self.activeSession.isRunning { self.activeSession.stopRunning() }
+                self.publish { self.isReady = false }
             }
         })
         observers.append(center.addObserver(forName: .AVCaptureSessionWasInterrupted,
-                                             object: session, queue: .main) { [weak self] notification in
+                                             object: nil, queue: .main) { [weak self] notification in
             guard let self = self else { return }
+            let observed = notification.object as? AVCaptureSession
             let reason = (notification.userInfo?[AVCaptureSessionInterruptionReasonKey] as? NSNumber)?.intValue
             let background = reason == AVCaptureSession.InterruptionReason.videoDeviceNotAvailableInBackground.rawValue
             if background && UIApplication.shared.applicationState != .active { self.sceneChanged(.background) }
             if self.phase.blocksConfiguration { self.beginFinishingTask() }
             self.captureQueue.async {
+                guard observed === self.activeSession else { return }
                 // A queued notification can outlive the interruption itself.
-                guard self.session.isInterrupted else { self.resumeSessionOnQueue(); return }
+                guard self.activeSession.isInterrupted else { self.resumeSessionOnQueue(); return }
                 self.turnTorchOff()
                 self.stopOnQueue(reason: "相机被系统中断，正在保存…")
                 self.publish { self.isReady = false; self.status = "相机暂被系统占用" }
@@ -1275,31 +1316,41 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             }
         })
         observers.append(center.addObserver(forName: .AVCaptureSessionInterruptionEnded,
-                                             object: session, queue: .main) { [weak self] _ in
+                                             object: nil, queue: .main) { [weak self] notification in
             guard let self = self else { return }
-            self.captureQueue.async { self.resumeSessionOnQueue() }
+            let observed = notification.object as? AVCaptureSession
+            self.captureQueue.async {
+                guard observed === self.activeSession else { return }
+                self.resumeSessionOnQueue()
+            }
         })
         observers.append(center.addObserver(forName: .AVCaptureSessionDidStartRunning,
-                                             object: session, queue: .main) { [weak self] _ in
+                                             object: nil, queue: .main) { [weak self] notification in
             guard let self = self else { return }
+            let observed = notification.object as? AVCaptureSession
             self.captureQueue.async {
-                let ready = self.foreground && self.configured && self.session.isRunning && !self.session.isInterrupted
+                guard observed === self.activeSession else { return }
+                let ready = self.foreground && self.configured && self.activeSession.isRunning && !self.activeSession.isInterrupted
                 self.publish { self.isReady = ready }
             }
         })
         observers.append(center.addObserver(forName: .AVCaptureSessionDidStopRunning,
-                                             object: session, queue: .main) { [weak self] _ in
+                                             object: nil, queue: .main) { [weak self] notification in
             guard let self = self else { return }
+            let observed = notification.object as? AVCaptureSession
             self.captureQueue.async {
-                if !self.session.isRunning { self.publish { self.isReady = false } }
+                guard observed === self.activeSession else { return }
+                if !self.activeSession.isRunning { self.publish { self.isReady = false } }
             }
         })
         observers.append(center.addObserver(forName: .AVCaptureSessionRuntimeError,
-                                             object: session, queue: .main) { [weak self] notification in
+                                             object: nil, queue: .main) { [weak self] notification in
             guard let self = self else { return }
+            let observed = notification.object as? AVCaptureSession
             let error = notification.userInfo?[AVCaptureSessionErrorKey] as? NSError
             let reportedInForeground = self.mainForeground
             self.captureQueue.async {
+                guard observed === self.activeSession else { return }
                 self.handleRuntimeErrorOnQueue(error, reportedInForeground: reportedInForeground)
             }
         })
@@ -1330,16 +1381,16 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         }
         // A background notification may reach our queue after a successful return.
         // Preserve a new, healthy capture instead of stopping it for that old event.
-        if !reportedInForeground && foreground && session.isRunning && !session.isInterrupted { return }
+        if !reportedInForeground && foreground && activeSession.isRunning && !activeSession.isInterrupted { return }
         stopOnQueue(reason: "相机发生错误，正在完成录像…")
         publish { self.isReady = false; self.status = "相机暂不可用，可点击重试" }
         guard foreground, reportedInForeground else { return }
         if error?.domain == AVFoundationErrorDomain,
            error?.code == AVError.Code.mediaServicesWereReset.rawValue,
-           capturePhase == .idle, !runtimeRecoveryAttempted, !session.isInterrupted {
+           capturePhase == .idle, !runtimeRecoveryAttempted, !activeSession.isInterrupted {
             runtimeRecoveryAttempted = true
             resumeSessionOnQueue()
-            if session.isRunning && !session.isInterrupted { return }
+            if activeSession.isRunning && !activeSession.isInterrupted { return }
         }
         report("相机运行错误", detail + "\n可在设置中复制最近相机错误。")
     }
@@ -1377,14 +1428,13 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     private func beginFinishingTask() {
         DispatchQueue.main.async {
             guard self.backgroundTask == .invalid else { return }
-            // Finish a file/export or bridge the bounded native PiP transition.
-            // Confirmed PiP ends this task and relies on AVKit's own lifecycle.
+            // A finite task finishes the file after foreground capture stops.
             self.backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "FinishRecording") { [weak self] in
                 guard let self = self else { return }
                 self.captureQueue.async {
-                    guard !self.canContinueInPictureInPicture else { return }
-                    if self.movieOutput.isRecording { self.movieOutput.stopRecording() }
-                    if self.session.isRunning { self.session.stopRunning() }
+                    if let dual = self.dualRecorder { dual.stop() }
+                else if self.movieOutput.isRecording { self.movieOutput.stopRecording() }
+                    if self.activeSession.isRunning { self.activeSession.stopRunning() }
                 }
                 self.endFinishingTask()
             }
@@ -1404,10 +1454,8 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         if configured && (value == .recording || value == .idle) { publishCapabilities() }
         publish {
             self.phase = value
-            // System / low-space stops also need time to finish the movie after
-            // the PiP window closes; route all movie stops through this phase.
+            // System and low-space stops still need time to finish the file.
             if value == .finishing { self.beginFinishingTask() }
-            if value != .recording && value != .preparing { self.onStopPictureInPicture?() }
         }
     }
     private func publish(_ action: @escaping @Sendable () -> Void) { DispatchQueue.main.async(execute: action) }

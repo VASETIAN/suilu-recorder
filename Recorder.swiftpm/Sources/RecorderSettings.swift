@@ -79,6 +79,7 @@ enum RecorderInterface: String, Codable, CaseIterable, Identifiable, Sendable {
 
 enum BrowserAddress {
     static let community = URL(string: "https://www.xiaoheihe.cn/app/bbs/home")!
+    static let videos = URL(string: "https://www.douyin.com/")!
     static func allows(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(), ["https", "http"].contains(scheme),
               let host = url.host, !host.isEmpty, url.user == nil, url.password == nil else { return false }
@@ -139,6 +140,7 @@ struct RecorderSettings: Codable, Equatable, Sendable {
     var thermalProtection = true
     var interfaceMode: RecorderInterface = .camera
     var obscureAppSwitcher = true
+    var dualCapture = false
     var mode: VideoMode { VideoMode(quality: quality, fps: fps, dynamicRange: dynamicRange) }
     var reserveBytes: Int64 { Int64(reserveMB) * 1_048_576 }
 
@@ -168,6 +170,7 @@ struct RecorderSettings: Codable, Equatable, Sendable {
                 value.thermalProtection = old["thermalProtection"] as? Bool ?? true
                 value.interfaceMode = RecorderInterface(rawValue: old["interfaceMode"] as? String ?? "") ?? .camera
                 value.obscureAppSwitcher = old["obscureAppSwitcher"] as? Bool ?? true
+                value.dualCapture = old["dualCapture"] as? Bool ?? false
             }
             if ![24, 30, 60, 120].contains(value.fps) { value.fps = 30 }
             if ![512, 1024, 2048].contains(value.reserveMB) { value.reserveMB = 512 }
@@ -191,6 +194,7 @@ struct RecorderSettings: Codable, Equatable, Sendable {
             && frontCamera == other.frontCamera && rearLens == other.rearLens
             && microphoneEnabled == other.microphoneEnabled && captureMode == other.captureMode
             && livePhotoEnabled == other.livePhotoEnabled
+            && dualCapture == other.dualCapture
     }
 }
 
@@ -218,10 +222,6 @@ enum RecordingPhase: Equatable, Sendable {
         case .saving: return "正在保存…"
         }
     }
-}
-
-enum CameraPiPState: Sendable {
-    case inactive, starting, active
 }
 
 struct RecorderMessage: Identifiable {

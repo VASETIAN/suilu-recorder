@@ -11,7 +11,7 @@ app = ROOT / 'build/DerivedData/Build/Products/Release-iphoneos/Recorder.app'
 assert app.is_dir(), 'Device App build is missing'
 info = plistlib.loads((app / 'Info.plist').read_bytes())
 assert info['CFBundleSupportedPlatforms'] == ['iPhoneOS']
-assert info['UIBackgroundModes'] == ['audio']
+assert 'UIBackgroundModes' not in info
 for key in ['NSCameraUsageDescription', 'NSMicrophoneUsageDescription',
             'NSPhotoLibraryAddUsageDescription', 'NSLocationWhenInUseUsageDescription']:
     assert info.get(key), f'Missing purpose string: {key}'

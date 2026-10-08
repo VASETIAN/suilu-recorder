@@ -9,6 +9,7 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
     @Published var notice: String?
     @Published var siteLabel = "小黑盒官方网页"
     @Published var isCommunityPage = true
+    @Published var isVideoPage = false
 
     lazy var webView: WKWebView = {
         let configuration = WKWebViewConfiguration()
@@ -52,8 +53,13 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
                 #page-bbs-community .bbs-home__content-item { padding:0!important; }
                 #page-bbs-community .hb-cpt__bbs-list-content { padding:14px 16px!important; }
                 #page-bbs-community .bbs-content__title { font-size:17px!important; line-height:1.5!important; }
-                #page-bbs-community .bbs-content__imgs-wrapper { display:flex!important; gap:6px; height:auto!important; overflow:hidden; }
-                #page-bbs-community .bbs-content__image { position:relative!important; inset:auto!important; width:auto!important; height:auto!important; flex:1 1 0; min-width:0; aspect-ratio:1; }
+                #page-bbs-community .bbs-content__imgs-wrapper { display:grid!important; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; height:auto!important; overflow:hidden; }
+                #page-bbs-community .bbs-content__imgs-wrapper:not(:has(> .bbs-content__image ~ .bbs-content__image)) { grid-template-columns:minmax(0,1fr); }
+                #page-bbs-community .bbs-content__imgs-wrapper:has(> .bbs-content__image:nth-child(2)):not(:has(> .bbs-content__image:nth-child(3))) { grid-template-columns:repeat(2,minmax(0,1fr)); }
+                #page-bbs-community .bbs-content__image { position:relative!important; inset:auto!important; width:100%!important; height:auto!important; min-width:0; min-height:0; aspect-ratio:1; overflow:hidden; }
+                #page-bbs-community .bbs-content__imgs-wrapper:not(:has(> .bbs-content__image ~ .bbs-content__image)) > .bbs-content__image { aspect-ratio:4/3; }
+                #page-bbs-community .bbs-content__image > .hb-cpt__image-elem { position:absolute!important; inset:0!important; width:100%!important; height:100%!important; object-fit:cover!important; }
+                #page-bbs-community .bbs-content__image-cnt { left:auto!important; right:6px!important; top:6px!important; z-index:1; }
                 #page-bbs-community .bbs-content__video_wrapper { max-width:100%!important; }
                 #page-bbs-link .hb-bbs-link { width:100%!important; box-sizing:border-box!important; }
                 #page-bbs-link .hb-bbs-link img { max-width:100%!important; }
@@ -84,6 +90,7 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
         open(url)
     }
     func home() { open(BrowserAddress.community) }
+    func videos() { open(BrowserAddress.videos) }
     func back() { webView.goBack() }
     func forward() { webView.goForward() }
     func reloadOrStop() { if loading { webView.stopLoading(); refresh() } else { webView.reload() } }
@@ -97,6 +104,7 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
             let official = ["www.xiaoheihe.cn", "xiaoheihe.cn"].contains(host)
             siteLabel = official ? "小黑盒官方网页" : host
             isCommunityPage = official && webView.url?.path.hasPrefix("/app/bbs/") == true
+            isVideoPage = host == "douyin.com" || host.hasSuffix(".douyin.com")
         }
     }
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
@@ -193,8 +201,8 @@ struct BrowserView: View {
             RecorderWebPage(browser: browser).frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
             HStack(spacing: 0) {
-                tab("社区", symbol: "square.grid.2x2", selected: browser.isCommunityPage && !searchFocused, action: browser.home)
-                tab("浏览", symbol: "safari", selected: !browser.isCommunityPage || searchFocused) { searchFocused = true }
+                tab("社区", symbol: "square.grid.2x2", selected: browser.isCommunityPage, action: browser.home)
+                tab("视频", symbol: "play.rectangle", selected: browser.isVideoPage, action: browser.videos)
                 tab("设置", symbol: "gearshape", selected: false, action: settings)
             }.padding(.vertical, 6)
         }

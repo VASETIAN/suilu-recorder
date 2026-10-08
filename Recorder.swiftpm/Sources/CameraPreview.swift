@@ -5,7 +5,6 @@ import UIKit
 @MainActor
 struct CameraPreview: UIViewRepresentable {
     @ObservedObject var recorder: RecorderController
-    let pictureInPicture: RecorderPictureInPicture
     let onBlackScreen: () -> Void
 
     func makeUIView(context: Context) -> CapturePreviewView {
@@ -18,12 +17,10 @@ struct CameraPreview: UIViewRepresentable {
         view.currentZoom = { recorder.zoom }
         view.onOrientation = {
             recorder.updateOrientation($0)
-            pictureInPicture.updateOrientation($0, front: recorder.settings.frontCamera)
         }
         view.onWindowChange = { [weak view] in
-            if let view = view { pictureInPicture.attach(source: view, recorder: recorder) }
+            if let view, recorder.dualPreview != nil { recorder.attachDualPreview(view.previewLayer, view.frontPreviewLayer) }
         }
-        view.onDetach = { [weak view] in pictureInPicture.detach(source: view) }
         return view
     }
 
@@ -31,31 +28,35 @@ struct CameraPreview: UIViewRepresentable {
         view.onDoubleTap = onBlackScreen
         view.gesturesEnabled = recorder.isReady && !recorder.isConfiguring
             && (recorder.phase == .idle || recorder.phase == .recording)
-        view.frontCamera = recorder.settings.frontCamera
-        pictureInPicture.attach(source: view, recorder: recorder)
+        view.dualCapture = recorder.dualPreview != nil
+        view.frontCamera = !view.dualCapture && recorder.settings.frontCamera
+        if view.dualCapture {
+            recorder.attachDualPreview(view.previewLayer, view.frontPreviewLayer)
+        } else {
+            if view.previewLayer.session !== recorder.session { view.previewLayer.session = recorder.session }
+            view.frontPreviewLayer.session = nil
+        }
         view.updateConnection()
     }
 
     static func dismantleUIView(_ view: CapturePreviewView, coordinator: ()) {
-        view.onDetach?()
         view.onWindowChange = nil
-        view.onDetach = nil
         view.onOrientation = nil
         view.previewLayer.session = nil
+        view.frontPreviewLayer.session = nil
     }
 }
 
 final class CapturePreviewView: UIView {
-    // One preview connection for the entire app. PiP temporarily moves this
-    // same layer rather than binding a second, off-screen camera preview.
     let previewLayer = AVCaptureVideoPreviewLayer()
+    let frontPreviewLayer = AVCaptureVideoPreviewLayer()
+    var dualCapture = false { didSet { frontPreviewLayer.isHidden = !dualCapture; setNeedsLayout() } }
     var onFocus: ((CGPoint) -> Void)?
     var onZoom: ((CGFloat) -> Void)?
     var onDoubleTap: (() -> Void)?
     var currentZoom: (() -> CGFloat)?
     var onOrientation: ((UIInterfaceOrientation) -> Void)?
     var onWindowChange: (() -> Void)?
-    var onDetach: (() -> Void)?
     var frontCamera = false
     var gesturesEnabled = false
     private var pinchStart: CGFloat = 1
@@ -65,6 +66,11 @@ final class CapturePreviewView: UIView {
         super.init(frame: frame)
         backgroundColor = .black
         layer.addSublayer(previewLayer)
+        frontPreviewLayer.videoGravity = .resizeAspectFill
+        frontPreviewLayer.cornerRadius = 14
+        frontPreviewLayer.masksToBounds = true
+        frontPreviewLayer.isHidden = true
+        layer.addSublayer(frontPreviewLayer)
         let tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
         let doubleTap = UITapGestureRecognizer(target: self, action: #selector(doubleTapped))
         doubleTap.numberOfTapsRequired = 2
@@ -92,15 +98,12 @@ final class CapturePreviewView: UIView {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             previewLayer.frame = bounds
+            frontPreviewLayer.frame = CGRect(x: bounds.width * 0.035,
+                                              y: bounds.width < bounds.height ? max(safeAreaInsets.top + 150, bounds.height * 0.20) : safeAreaInsets.top + 64,
+                                              width: bounds.width * 0.28, height: bounds.height * 0.28)
             CATransaction.commit()
         }
         updateConnection()
-    }
-
-    func restorePreview() {
-        previewLayer.videoGravity = .resizeAspectFill
-        layer.insertSublayer(previewLayer, at: 0)
-        setNeedsLayout()
     }
 
     @objc private func doubleTapped() { if gesturesEnabled { onDoubleTap?() } }
@@ -131,6 +134,17 @@ final class CapturePreviewView: UIView {
                 connection.automaticallyAdjustsVideoMirroring = false
                 connection.isVideoMirrored = frontCamera
             }
+        }
+        if let connection = frontPreviewLayer.connection {
+            if connection.isVideoOrientationSupported {
+                switch interface {
+                case .landscapeLeft: connection.videoOrientation = .landscapeLeft
+                case .landscapeRight: connection.videoOrientation = .landscapeRight
+                case .portraitUpsideDown: connection.videoOrientation = .portraitUpsideDown
+                default: connection.videoOrientation = .portrait
+                }
+            }
+            if connection.isVideoMirroringSupported { connection.automaticallyAdjustsVideoMirroring = false; connection.isVideoMirrored = false }
         }
         onOrientation?(interface)
     }

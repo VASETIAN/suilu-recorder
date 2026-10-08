@@ -7,7 +7,6 @@ import UIKit
 struct SettingsView: View {
     @ObservedObject var recorder: RecorderController
     @ObservedObject var location: LocationService
-    @ObservedObject var pictureInPicture: RecorderPictureInPicture
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @State private var draft: RecorderSettings
@@ -15,22 +14,23 @@ struct SettingsView: View {
     @State private var pendingBrowserStart = false
     @State private var browserStartSubmitted = false
 
-    init(recorder: RecorderController, location: LocationService, pictureInPicture: RecorderPictureInPicture) {
+    init(recorder: RecorderController, location: LocationService) {
         self.recorder = recorder
         self.location = location
-        self.pictureInPicture = pictureInPicture
         _draft = State(initialValue: recorder.settings)
     }
 
+    private var modes: [VideoMode] { draft.dualCapture ? recorder.dualCaptureModes : recorder.supportedModes }
+
     private var qualities: [VideoQuality] {
-        VideoQuality.allCases.filter { quality in recorder.supportedModes.contains { $0.quality == quality } }
+        VideoQuality.allCases.filter { quality in modes.contains { $0.quality == quality } }
     }
     private var frameRates: [Int] {
-        Array(Set(recorder.supportedModes.filter { $0.quality == draft.quality }.map { $0.fps })).sorted()
+        Array(Set(modes.filter { $0.quality == draft.quality }.map { $0.fps })).sorted()
     }
     private var dynamicRanges: [VideoDynamicRange] {
         VideoDynamicRange.allCases.filter { range in
-            recorder.supportedModes.contains { $0.quality == draft.quality && $0.fps == draft.fps && $0.dynamicRange == range }
+            modes.contains { $0.quality == draft.quality && $0.fps == draft.fps && $0.dynamicRange == range }
         }
     }
 
@@ -77,6 +77,11 @@ struct SettingsView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }.disabled(!recorder.canConfigure)
                 Section("录像") {
+                    Toggle("前后同步录像", isOn: $draft.dualCapture).disabled(!recorder.dualCaptureSupported)
+                    Text(recorder.dualCaptureSupported
+                         ? "默认关闭。开启后后置主摄为大画面，前置为左上角小画面，合成一个带声音的视频；双摄提供设备支持的 720p／1080p、24／30fps、SDR。拍照与 Live Photo 使用单摄。"
+                         : "当前设备没有可用的前后同步摄像组合。")
+                        .font(.caption).foregroundStyle(.secondary)
                     if qualities.isEmpty {
                         Text("相机准备完成后可选择画质。")
                     } else {
@@ -107,7 +112,7 @@ struct SettingsView: View {
                     Toggle("黑屏时将屏幕亮度降到最低", isOn: $draft.dimBlackScreen)
                     Text("恢复界面或离开前台时还原此前亮度。此设置降低整个屏幕亮度，系统相机和麦克风隐私指示仍正常显示。")
                         .font(.caption).foregroundStyle(.secondary)
-                    Text("黑屏遮住 App 画面，录像仍在前台进行。离开前台时只有已获系统允许的画中画能继续录像；锁屏或相机被系统中断时停止并保存。系统隐私指示始终正常显示。")
+                    Text("黑屏遮住 App 画面，录像仍在前台进行。离开前台时停止并保存；锁屏或相机被系统中断时停止并保存。系统隐私指示始终正常显示。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .disabled(!recorder.canConfigure)
@@ -118,10 +123,7 @@ struct SettingsView: View {
                     Text("默认关闭。开启后，离开前台会保存当前一段；回到 App 且保存、相机和权限正常后，用原参数开始新的一段，并恢复此前的黑屏。离开的时间没有画面，不拼接文件；退出进程不会自动录像。保存失败、空间不足、过热或相机错误时取消恢复。")
                         .font(.caption).foregroundStyle(.secondary)
                     LabeledContent("分屏 / 侧拉拍摄", value: recorder.multitaskingCameraSupported ? "运行环境支持" : "当前环境不支持")
-                    LabeledContent("系统画中画", value: pictureInPicture.status)
-                    Text("开始录像后手动点击主界面的‘画中画’，等实时小窗出现后再返回主屏幕。仅系统允许多任务相机的环境可以继续录像。关闭后台小窗、将小窗收起或相机被中断时停止并保存；回到前台后关闭画中画可继续录像。")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text("小窗保留实时画面和 REC 标识，最终尺寸由系统管理。普通 iPhone 录像 App 没有后台相机权限；不支持时返回主屏幕会停止并保存，回来后可以再次录像。")
+                    Text("已移除无法保证连续录制的画中画功能。返回主屏幕会停止并保存，回来后可再次录像，或使用上面的分段恢复开关。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
 
@@ -184,7 +186,7 @@ struct SettingsView: View {
                 }
 
                 Section("关于畅游") {
-                    LabeledContent("版本", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.4.2")
+                    LabeledContent("版本", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.4.3")
                     Text("使用 Apple 原生拍摄、画质优先处理、自动白平衡和支持时的镜头畸变校正。原照片直接保存，App 不加美颜或 AI 滤镜。系统是否使用多帧融合等处理由设备和场景决定，成片不保证与系统相机所有模式一致。")
                         .font(.caption).foregroundStyle(.secondary)
                     Text("开始前选择长焦倍率会使用真实长焦镜头；受格式能力限制，可能自动降低帧率。4K120 通常需要主摄。其他倍率可能是传感器裁切或数字变焦。照片 JPEG、视频 MOV，Live Photo 保留配对文件。")
@@ -217,6 +219,13 @@ struct SettingsView: View {
                 clampDynamicRange()
             }
             .onChange(of: draft.fps) { _ in clampDynamicRange() }
+            .onChange(of: draft.dualCapture) { enabled in
+                if enabled {
+                    draft.captureMode = .video
+                    let mode = VideoMode.closest(to: draft.mode, in: recorder.dualCaptureModes)
+                    draft.quality = mode.quality; draft.fps = mode.fps; draft.dynamicRange = mode.dynamicRange
+                }
+            }
             .onAppear { recorder.refreshLibrary() }
             .onChange(of: recorder.isConfiguring) { _ in continueBrowsingStart() }
             .onChange(of: recorder.isReady) { _ in continueBrowsingStart() }
