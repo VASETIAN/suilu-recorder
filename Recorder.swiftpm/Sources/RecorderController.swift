@@ -28,6 +28,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     @Published private(set) var multitaskingCameraSupported = false
     @Published private(set) var activeLensLabel = "相机"
     @Published private(set) var status = "正在准备相机…"
+    @Published private(set) var lastCameraError = UserDefaults.standard.string(forKey: "Recorder.lastCameraError")
     @Published var message: RecorderMessage?
     // Main-queue callback owned by the visible PiP presentation.
     var onStopPictureInPicture: (() -> Void)?
@@ -55,7 +56,8 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     private var observers: [NSObjectProtocol] = []
     private var tickCount = 0
     private var startTaskRunning = false
-    private var mainForeground = true
+    private var mainForeground = false
+    private var runtimeRecoveryAttempted = false
     private var permissionGeneration = 0
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
@@ -135,17 +137,20 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
 
     func sceneChanged(_ scenePhase: ScenePhase) {
         if scenePhase == .active {
+            guard !mainForeground else { return }
             mainForeground = true
             captureQueue.async {
                 self.foreground = true
+                self.runtimeRecoveryAttempted = false
                 // The UI phase can lag behind an already completed file callback.
                 // Reconcile on the queue that owns capture state as well.
                 if self.capturePhase == .recording && self.session.isRunning && !self.session.isInterrupted {
                     self.publish { self.isReady = true; self.status = "录像中" }
-                } else { self.resumeSessionOnQueue() }
+                } else if self.configured { self.resumeSessionOnQueue() }
+                else { self.publish { self.start() } }
             }
-            if phase == .idle { start() }
         } else if scenePhase == .background {
+            guard mainForeground else { return }
             mainForeground = false
             isReady = false
             permissionGeneration += 1
@@ -914,6 +919,10 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
 
     private func resumeSessionOnQueue() {
         guard foreground, configured, capturePhase == .idle else { return }
+        guard !session.isInterrupted else {
+            publish { self.isReady = false; self.status = "等待系统解除相机中断" }
+            return
+        }
         if !session.isRunning { session.startRunning() }
         let ready = session.isRunning && !session.isInterrupted
         let label = captureSettings.captureMode == .video ? "准备录像" : "准备拍照"
@@ -1081,17 +1090,9 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                                              object: session, queue: .main) { [weak self] notification in
             guard let self = self else { return }
             let error = notification.userInfo?[AVCaptureSessionErrorKey] as? NSError
+            let reportedInForeground = self.mainForeground
             self.captureQueue.async {
-                self.stopOnQueue(reason: "相机发生错误，正在完成录像…")
-                self.publish { self.isReady = false }
-                if self.capturePhase == .idle && self.foreground,
-                   error?.code == AVError.Code.mediaServicesWereReset.rawValue {
-                    self.session.startRunning()
-                    let ready = self.session.isRunning
-                    self.publish { self.isReady = ready; self.status = ready ? "准备录像" : "相机暂不可用" }
-                } else {
-                    self.report("相机运行错误", error?.localizedDescription ?? "相机暂不可用，请返回前台后重试。")
-                }
+                self.handleRuntimeErrorOnQueue(error, reportedInForeground: reportedInForeground)
             }
         })
         observers.append(center.addObserver(forName: .AVCaptureDeviceSubjectAreaDidChange,
@@ -1107,6 +1108,31 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                 } catch { /* Autofocus can resume on the next configuration. */ }
             }
         })
+    }
+
+    private func handleRuntimeErrorOnQueue(_ error: NSError?, reportedInForeground: Bool) {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.4.1"
+        let mode = captureSettings.captureMode == .video ? captureSettings.mode.title : captureSettings.captureMode.title
+        let lens = videoInput.map { Self.lensLabel($0.device) } ?? "相机"
+        let detail = "随心记 \(version) · \(mode) · \(lens)\n" + CameraErrorDetail.describe(error)
+        publish {
+            self.lastCameraError = detail
+            UserDefaults.standard.set(detail, forKey: "Recorder.lastCameraError")
+        }
+        // A background notification may reach our queue after a successful return.
+        // Preserve a new, healthy capture instead of stopping it for that old event.
+        if !reportedInForeground && foreground && session.isRunning && !session.isInterrupted { return }
+        stopOnQueue(reason: "相机发生错误，正在完成录像…")
+        publish { self.isReady = false; self.status = "相机暂不可用，可点击重试" }
+        guard foreground, reportedInForeground else { return }
+        if error?.domain == AVFoundationErrorDomain,
+           error?.code == AVError.Code.mediaServicesWereReset.rawValue,
+           capturePhase == .idle, !runtimeRecoveryAttempted, !session.isInterrupted {
+            runtimeRecoveryAttempted = true
+            resumeSessionOnQueue()
+            if session.isRunning && !session.isInterrupted { return }
+        }
+        report("相机运行错误", detail + "\n可在设置中复制最近相机错误。")
     }
 
     private static func requestCapturePermission(_ media: AVMediaType) async -> Bool {

@@ -163,6 +163,22 @@ struct RecorderMessage: Identifiable {
     let detail: String
 }
 
+enum CameraErrorDetail {
+    static func describe(_ error: NSError?) -> String {
+        guard let error = error else { return "系统未提供错误代码。" }
+        var lines = [error.localizedDescription]
+        var current: NSError? = error
+        // Keep a bounded underlying-error chain, without dumping paths or userInfo.
+        for _ in 0..<3 {
+            guard let value = current else { break }
+            lines.append("\(value.domain) (\(value.code))")
+            if let reason = value.localizedFailureReason { lines.append(reason) }
+            current = value.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return lines.joined(separator: "\n")
+    }
+}
+
 struct PendingRecording: Identifiable {
     let url: URL
     let size: Int64

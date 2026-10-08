@@ -122,13 +122,19 @@ struct SettingsView: View {
                 }
 
                 Section("关于随心记") {
-                    LabeledContent("版本", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.4.0")
+                    LabeledContent("版本", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.4.1")
                     Text("使用 Apple 原生拍摄、画质优先处理、自动白平衡和支持时的镜头畸变校正。原照片直接保存，App 不加美颜或 AI 滤镜。系统是否使用多帧融合等处理由设备和场景决定，成片不保证与系统相机所有模式一致。")
                         .font(.caption).foregroundStyle(.secondary)
                     Text("开始前选择长焦倍率会使用真实长焦镜头；受格式能力限制，可能自动降低帧率。4K120 通常需要主摄。其他倍率可能是传感器裁切或数字变焦。照片 JPEG、视频 MOV，Live Photo 保留配对文件。")
                         .font(.caption).foregroundStyle(.secondary)
                     Text("录像方向在开始时确定。录制中旋转设备会调整预览和操作界面，文件保持开始时的方向。横屏录像请先横放设备再开始。")
                         .font(.caption).foregroundStyle(.secondary)
+                }
+                if let detail = recorder.lastCameraError {
+                    Section("最近相机错误") {
+                        Text(detail).font(.caption).textSelection(.enabled)
+                        Button("复制错误详情") { UIPasteboard.general.string = detail }
+                    }
                 }
             }
             .navigationTitle("拍摄设置")
