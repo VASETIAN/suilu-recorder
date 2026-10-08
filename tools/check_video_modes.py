@@ -16,6 +16,12 @@ assert(VideoMode.closest(to: hdr120, in: [hd30, hdr120, hdr60]) == hdr120)
 assert(VideoMode.closest(to: sdr120, in: [hd30, hdr60]) == hdr60)
 assert(VideoMode.closest(to: hd30, in: [hdr60, hd30]) == hd30)
 assert(Set([sdr120, hdr120]).count == 2)
+assert(CameraZoom.telephotoBase(switchOvers: [2, 8], multiplier: 0.5) == 4)
+assert(CameraZoom.telephotoBase(switchOvers: [2, 10], multiplier: 0.5) == 5)
+assert(CameraZoom.telephotoBase(switchOvers: [], multiplier: 1) == nil)
+assert(CameraZoom.stops(minimum: 0.5, maximum: 15, telephoto: 4) == [0.5, 1, 2, 4, 8])
+assert(CameraZoom.stops(minimum: 4, maximum: 16, telephoto: 4) == [4, 8])
+assert(CameraZoom.stops(minimum: 1, maximum: 3, telephoto: nil) == [1, 2])
 
 let key = "Recorder.settings.v1"
 let previous = UserDefaults.standard.data(forKey: key)
@@ -29,8 +35,9 @@ UserDefaults.standard.set(try JSONSerialization.data(withJSONObject: old), forKe
 let migrated = RecorderSettings.load()
 assert(migrated.fps == 60 && migrated.dynamicRange == .sdr && !migrated.includeLocation)
 assert(migrated.recovery == .longPress && migrated.livePhotoEnabled)
+assert(migrated.rearLens == .automatic)
 var new = migrated
-new.fps = 120; new.dynamicRange = .hdr; new.save()
+new.fps = 120; new.dynamicRange = .hdr; new.rearLens = .telephoto; new.save()
 assert(RecorderSettings.load() == new)
 new.fps = 999; new.save()
 assert(RecorderSettings.load().fps == 30)
@@ -43,7 +50,7 @@ var legacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(item)) 
 legacy.removeValue(forKey: "dynamicRange")
 let restored = try JSONDecoder().decode(MediaItem.self, from: JSONSerialization.data(withJSONObject: legacy))
 assert(restored.id == item.id && restored.dynamicRange == nil)
-print("PASS: HDR/SDR mode selection, 120fps persistence, old settings and gallery compatibility")
+print("PASS: HDR/SDR modes, telephoto zoom stops, 120fps/lens persistence, old settings and gallery compatibility")
 print("These model checks do not verify camera formats or encoded video on a device.")
 '''
 folder = root / 'build'

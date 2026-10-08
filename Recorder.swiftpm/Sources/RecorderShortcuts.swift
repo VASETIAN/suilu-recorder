@@ -5,6 +5,10 @@ import Foundation
 // A Swift Playgrounds preview cannot register its own control-center app entry.
 enum RecorderLaunchRequest {
     static let notification = Notification.Name("Recorder.openCamera")
+    static func request() {
+        UserDefaults.standard.set(true, forKey: "Recorder.openCamera.requested")
+        NotificationCenter.default.post(name: notification, object: nil)
+    }
     static func consume() -> Bool {
         let defaults = UserDefaults.standard
         let value = defaults.bool(forKey: "Recorder.openCamera.requested")
@@ -19,8 +23,26 @@ struct OpenRecorderCameraIntent: AppIntent {
     static var openAppWhenRun: Bool = true
     @MainActor
     func perform() async throws -> some IntentResult {
-        UserDefaults.standard.set(true, forKey: "Recorder.openCamera.requested")
-        NotificationCenter.default.post(name: RecorderLaunchRequest.notification, object: nil)
+        RecorderLaunchRequest.request()
+        return .result()
+    }
+}
+
+@available(iOS 18.0, *)
+enum CameraControlDestination: String, AppEnum {
+    case camera
+    static var typeDisplayRepresentation = TypeDisplayRepresentation(name: "随心记界面")
+    static var caseDisplayRepresentations: [Self: DisplayRepresentation] = [.camera: "相机"]
+}
+
+@available(iOS 18.0, *)
+struct OpenCameraControlIntent: OpenIntent {
+    static var title: LocalizedStringResource = "开启随心记相机"
+    static var openAppWhenRun: Bool = true
+    @Parameter(title: "界面") var target: CameraControlDestination = .camera
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        RecorderLaunchRequest.request()
         return .result()
     }
 }

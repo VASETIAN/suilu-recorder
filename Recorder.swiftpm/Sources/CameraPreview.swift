@@ -78,7 +78,7 @@ final class CapturePreviewView: UIView {
         layer.addSublayer(focusRing)
         isAccessibilityElement = true
         accessibilityLabel = "相机预览"
-        accessibilityHint = "单击对焦，双指缩放；录像中双击进入黑屏。"
+        accessibilityHint = "单击对焦，双指缩放；录像中或拍照界面双击进入黑屏。"
         accessibilityCustomActions = [UIAccessibilityCustomAction(name: "进入黑屏", target: self, selector: #selector(accessibilityBlackScreen))]
     }
 

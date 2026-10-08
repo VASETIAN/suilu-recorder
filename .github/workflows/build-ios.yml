@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['Recorder.swiftpm/**', 'tools/**', '.github/workflows/build-ios.yml']
+    paths: ['Recorder.swiftpm/**', 'Controls/**', 'tools/**', '.github/workflows/build-ios.yml']
 permissions:
   contents: read
 jobs:

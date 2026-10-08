@@ -69,11 +69,27 @@ enum CaptureMode: String, Codable, CaseIterable, Identifiable, Sendable {
     }
 }
 
+enum RearCameraLens: String, Codable, Sendable { case automatic, telephoto }
+
+enum CameraZoom {
+    static func telephotoBase(switchOvers: [Double], multiplier: Double) -> Double? {
+        guard let last = switchOvers.last, multiplier > 0 else { return nil }
+        let value = (last * multiplier * 2).rounded() / 2
+        return value > 1 ? value : nil
+    }
+    static func stops(minimum: Double, maximum: Double, telephoto: Double?) -> [Double] {
+        var values = [0.5, 1, 2]
+        if let telephoto = telephoto { values += [telephoto, telephoto * 2] }
+        return Array(Set(values)).filter { $0 >= minimum - 0.01 && $0 <= maximum + 0.01 }.sorted()
+    }
+}
+
 struct RecorderSettings: Codable, Equatable, Sendable {
     var quality: VideoQuality = .hd1080
     var fps = 30
     var dynamicRange: VideoDynamicRange = .sdr
     var frontCamera = false
+    var rearLens: RearCameraLens = .automatic
     var microphoneEnabled = true
     var recovery: BlackScreenRecovery = .doubleTap
     var autoBlackScreen = false
@@ -96,6 +112,7 @@ struct RecorderSettings: Codable, Equatable, Sendable {
                 value.fps = old["fps"] as? Int ?? 30
                 value.dynamicRange = VideoDynamicRange(rawValue: old["dynamicRange"] as? String ?? "") ?? .sdr
                 value.frontCamera = old["frontCamera"] as? Bool ?? false
+                value.rearLens = RearCameraLens(rawValue: old["rearLens"] as? String ?? "") ?? .automatic
                 value.microphoneEnabled = old["microphoneEnabled"] as? Bool ?? true
                 value.recovery = BlackScreenRecovery(rawValue: old["recovery"] as? String ?? "") ?? .doubleTap
                 value.autoBlackScreen = old["autoBlackScreen"] as? Bool ?? false

@@ -56,9 +56,9 @@ struct SettingsView: View {
                 .disabled(!recorder.canConfigure)
 
                 Section("黑屏模式") {
-                    Text("录像中双击取景器进入黑屏，也可用下方设置自动进入。")
+                    Text("录像中或拍照界面双击取景器进入黑屏。黑屏拍照：单击拍一张，长按 0.8 秒恢复；Live 开关和镜头保持进入前的设置。")
                         .font(.caption).foregroundStyle(.secondary)
-                    Picker("恢复方式", selection: $draft.recovery) {
+                    Picker("录像恢复方式", selection: $draft.recovery) {
                         ForEach(BlackScreenRecovery.allCases) { Text($0.title).tag($0) }
                     }
                     Toggle("开始录像后自动黑屏", isOn: $draft.autoBlackScreen)
@@ -122,8 +122,10 @@ struct SettingsView: View {
                 }
 
                 Section("关于随心记") {
-                    LabeledContent("版本", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.3.0")
-                    Text("个人录像工具 · 使用 Apple AVFoundation 与 PhotoKit。照片为 JPEG，视频为 MOV，Live Photo 保留配对的照片与动态片段。2× 在部分设备上属于数字变焦；0.5× 仅在当前摄像头和格式支持时显示。")
+                    LabeledContent("版本", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.4.0")
+                    Text("使用 Apple 原生拍摄、画质优先处理、自动白平衡和支持时的镜头畸变校正。原照片直接保存，App 不加美颜或 AI 滤镜。系统是否使用多帧融合等处理由设备和场景决定，成片不保证与系统相机所有模式一致。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("开始前选择长焦倍率会使用真实长焦镜头；受格式能力限制，可能自动降低帧率。4K120 通常需要主摄。其他倍率可能是传感器裁切或数字变焦。照片 JPEG、视频 MOV，Live Photo 保留配对文件。")
                         .font(.caption).foregroundStyle(.secondary)
                     Text("录像方向在开始时确定。录制中旋转设备会调整预览和操作界面，文件保持开始时的方向。横屏录像请先横放设备再开始。")
                         .font(.caption).foregroundStyle(.secondary)

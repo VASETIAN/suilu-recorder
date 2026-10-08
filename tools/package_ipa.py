@@ -18,6 +18,14 @@ for key in ['NSCameraUsageDescription', 'NSMicrophoneUsageDescription',
 executable = app / info['CFBundleExecutable']
 magic, cpu = struct.unpack('<II', executable.read_bytes()[:8])
 assert magic == 0xFEEDFACF and cpu == 0x0100000C, 'Expected a real arm64 Mach-O executable'
+control = app / 'PlugIns/RecorderControls.appex'
+assert control.is_dir(), 'Native Control Center extension is missing'
+control_info = plistlib.loads((control / 'Info.plist').read_bytes())
+assert control_info['NSExtension']['NSExtensionPointIdentifier'] == 'com.apple.widgetkit-extension'
+assert control_info['CFBundleIdentifier'] == info['CFBundleIdentifier'] + '.controls'
+assert control_info['CFBundleVersion'] == info['CFBundleVersion']
+assert control_info['CFBundleShortVersionString'] == info['CFBundleShortVersionString']
+assert struct.unpack('<II', (control / control_info['CFBundleExecutable']).read_bytes()[:8]) == (0xFEEDFACF, 0x0100000C)
 output = ROOT / 'build/artifacts'
 output.mkdir(parents=True, exist_ok=True)
 ipa = output / f'Recorder-{info["CFBundleShortVersionString"]}-unsigned.ipa'
@@ -32,6 +40,7 @@ with zipfile.ZipFile(ipa) as archive:
 result = {'version': info['CFBundleShortVersionString'], 'build': info['CFBundleVersion'],
     'display_name': info['CFBundleDisplayName'], 'bundle_identifier': info['CFBundleIdentifier'], 'platform': 'iPhoneOS', 'architecture': 'arm64',
     'ipa_bytes': ipa.stat().st_size, 'sha256': hashlib.sha256(ipa.read_bytes()).hexdigest(),
+    'control_center_extension': control_info['CFBundleIdentifier'],
     'signing': 'unsigned; sign locally with your own account before installing',
     'hardware_test': 'not run'}
 (output / 'build-verification.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')

@@ -26,6 +26,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     @Published private(set) var libraryItems: [MediaItem] = []
     @Published private(set) var livePhotoSupported = false
     @Published private(set) var multitaskingCameraSupported = false
+    @Published private(set) var activeLensLabel = "相机"
     @Published private(set) var status = "正在准备相机…"
     @Published var message: RecorderMessage?
     // Main-queue callback owned by the visible PiP presentation.
@@ -197,7 +198,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             && session.isRunning && !session.isInterrupted
     }
 
-    func apply(_ value: RecorderSettings) {
+    func apply(_ value: RecorderSettings, displayedZoom: CGFloat? = nil) {
         guard canConfigure else { return }
         isConfiguring = true
         Task { @MainActor in
@@ -210,7 +211,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                 }
             }
             guard mainForeground else { isConfiguring = false; return }
-            configure(requested)
+            configure(requested, displayedZoom: displayedZoom)
         }
     }
 
@@ -220,14 +221,14 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         apply(value)
     }
 
-    private func configure(_ requested: RecorderSettings) {
+    private func configure(_ requested: RecorderSettings, displayedZoom: CGFloat? = nil) {
         captureQueue.async {
             guard self.capturePhase == .idle, self.foreground else {
                 self.publish { self.isConfiguring = false }
                 return
             }
             do {
-                let applied = try self.configureOnQueue(requested)
+                let applied = try self.configureOnQueue(requested, displayedZoom: displayedZoom)
                 if !self.session.isRunning { self.session.startRunning() }
                 let running = self.session.isRunning && !self.session.isInterrupted
                 self.publish {
@@ -249,16 +250,18 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         }
     }
 
-    private func configureOnQueue(_ requested: RecorderSettings) throws -> RecorderSettings {
+    private func configureOnQueue(_ requested: RecorderSettings, displayedZoom: CGFloat? = nil) throws -> RecorderSettings {
         guard Self.hasPurposeString("NSCameraUsageDescription"),
               AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
             throw RecorderError("相机权限未准备好，请允许相机权限后重试。")
         }
         guard let device = Self.camera(front: requested.frontCamera,
-                                      mode: requested.captureMode == .video ? requested.mode : nil) else {
+                                      mode: requested.captureMode == .video ? requested.mode : nil,
+                                      lens: requested.rearLens) else {
             throw RecorderError("没有可用摄像头。")
         }
         var applied = requested
+        if device.deviceType != .builtInTelephotoCamera { applied.rearLens = .automatic }
         if applied.captureMode != .video {
             applied.captureMode = applied.livePhotoEnabled ? .livePhoto : .photo
         }
@@ -280,6 +283,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         let oldOutputs = session.outputs
         let oldPreset = session.sessionPreset
         let oldLiveEnabled = photoOutput.isLivePhotoCaptureEnabled
+        let oldPhotoDimensions = photoOutput.maxPhotoDimensions
         let oldFormat = device.activeFormat
         let oldMinimum = device.activeVideoMinFrameDuration
         let oldMaximum = device.activeVideoMaxFrameDuration
@@ -331,7 +335,6 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                     session.addOutput(photoOutput)
                 }
                 photoOutput.maxPhotoQualityPrioritization = .quality
-                photoOutput.isHighResolutionCaptureEnabled = true
                 if applied.captureMode == .livePhoto && !photoOutput.isLivePhotoCaptureSupported {
                     applied.captureMode = .photo
                     applied.livePhotoEnabled = false
@@ -353,16 +356,34 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                 device.activeVideoMaxFrameDuration = duration
             } else {
                 session.automaticallyConfiguresCaptureDeviceForWideColor = true
+                // Use Apple's processed-photo pipeline at the largest directly
+                // delivered dimensions. 24MP deferred proxies need PhotoKit and
+                // are not suitable for our durable local-original workflow.
+                let dimensions = device.activeFormat.supportedMaxPhotoDimensions
+                let direct = dimensions.filter {
+                    let pixels = Int64($0.width) * Int64($0.height)
+                    return !(pixels > 20_000_000 && pixels < 30_000_000)
+                        && (applied.captureMode != .livePhoto || pixels <= 16_000_000)
+                }
+                if let maximum = (direct.isEmpty ? dimensions : direct).max(by: {
+                    Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height)
+                }) { photoOutput.maxPhotoDimensions = maximum }
+                if photoOutput.isContentAwareDistortionCorrectionSupported {
+                    photoOutput.isContentAwareDistortionCorrectionEnabled = true
+                }
             }
             if device.isFocusModeSupported(.continuousAutoFocus) { device.focusMode = .continuousAutoFocus }
             if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
+            if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) { device.whiteBalanceMode = .continuousAutoWhiteBalance }
             device.isSubjectAreaChangeMonitoringEnabled = true
             if device.hasTorch && device.isTorchModeSupported(.off) { device.torchMode = .off }
             videoInput = input
             audioInput = newAudio
             zoomScale = Self.displayZoomScale(device)
             let limits = zoomLimits(device)
-            device.videoZoomFactor = min(max(oldVideo === input ? oldZoom : zoomScale, limits.lowerBound), limits.upperBound)
+            let defaultZoom: CGFloat = device.deviceType == .builtInTelephotoCamera ? 1 : zoomScale
+            let targetZoom = displayedZoom.map { $0 * zoomScale } ?? (oldVideo === input ? oldZoom : defaultZoom)
+            device.videoZoomFactor = min(max(targetZoom, limits.lowerBound), limits.upperBound)
             captureSettings = applied
             if applied.captureMode == .video {
                 movieOutput.minFreeDiskSpaceLimit = applied.reserveBytes
@@ -413,6 +434,9 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             session.automaticallyConfiguresCaptureDeviceForWideColor = oldWideColor
             if session.outputs.contains(where: { $0 === photoOutput }) {
                 photoOutput.isLivePhotoCaptureEnabled = photoOutput.isLivePhotoCaptureSupported && oldLiveEnabled
+                if oldVideo?.device.activeFormat.supportedMaxPhotoDimensions.contains(where: {
+                    $0.width == oldPhotoDimensions.width && $0.height == oldPhotoDimensions.height
+                }) == true { photoOutput.maxPhotoDimensions = oldPhotoDimensions }
             }
             throw error
         }
@@ -422,7 +446,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         let position: AVCaptureDevice.Position = front ? .front : .back
         let types: [AVCaptureDevice.DeviceType] = front
             ? [.builtInWideAngleCamera, .builtInTrueDepthCamera]
-            : [.builtInTripleCamera, .builtInDualWideCamera, .builtInDualCamera, .builtInWideAngleCamera]
+            : [.builtInTripleCamera, .builtInDualWideCamera, .builtInDualCamera, .builtInWideAngleCamera, .builtInTelephotoCamera]
         let devices = AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .video,
                                                         position: position).devices
         // Prefer a virtual multi-lens camera so pinch zoom can cross the 0.5x / 1x
@@ -430,8 +454,10 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         return types.compactMap { type in devices.first(where: { $0.deviceType == type }) }
     }
 
-    static func camera(front: Bool, mode: VideoMode? = nil) -> AVCaptureDevice? {
+    static func camera(front: Bool, mode: VideoMode? = nil, lens: RearCameraLens = .automatic) -> AVCaptureDevice? {
         let devices = cameras(front: front)
+        if !front && lens == .telephoto,
+           let telephoto = devices.first(where: { $0.deviceType == .builtInTelephotoCamera }) { return telephoto }
         // Some high-speed modes exist only on the physical main camera.
         if let mode = mode, let exact = devices.first(where: { format(for: mode, device: $0) != nil }) { return exact }
         return devices.first
@@ -478,11 +504,36 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     }
 
     private static func displayZoomScale(_ device: AVCaptureDevice) -> CGFloat {
+        if device.deviceType == .builtInTelephotoCamera, let base = telephotoBase() { return 1 / base }
+        if #available(iOS 18.0, *), device.displayVideoZoomFactorMultiplier > 0 {
+            return 1 / device.displayVideoZoomFactorMultiplier
+        }
         if device.constituentDevices.contains(where: { $0.deviceType == .builtInUltraWideCamera }),
            let firstSwitch = device.virtualDeviceSwitchOverVideoZoomFactors.first {
             return CGFloat(truncating: firstSwitch)
         }
         return 1
+    }
+
+    private static func telephotoBase() -> CGFloat? {
+        let devices = cameras(front: false)
+        guard devices.contains(where: { $0.deviceType == .builtInTelephotoCamera }),
+              let virtual = devices.first(where: { $0.constituentDevices.contains { $0.deviceType == .builtInTelephotoCamera } }) else { return nil }
+        let multiplier: Double
+        if #available(iOS 18.0, *) { multiplier = Double(virtual.displayVideoZoomFactorMultiplier) }
+        else { multiplier = 1 / Double(displayZoomScale(virtual)) }
+        return CameraZoom.telephotoBase(switchOvers: virtual.virtualDeviceSwitchOverVideoZoomFactors.map { $0.doubleValue },
+                                       multiplier: multiplier).map { CGFloat($0) }
+    }
+
+    private static func lensLabel(_ device: AVCaptureDevice) -> String {
+        if device.position == .front { return "前置相机" }
+        let actual = device.activePrimaryConstituentDevice ?? device
+        switch actual.deviceType {
+        case .builtInTelephotoCamera: return "后置长焦"
+        case .builtInUltraWideCamera: return "后置超广角"
+        default: return "后置主摄"
+        }
     }
 
     private func zoomLimits(_ device: AVCaptureDevice) -> ClosedRange<CGFloat> {
@@ -494,13 +545,30 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
 
     private func publishCapabilities() {
         guard let device = videoInput?.device else { return }
-        let modes = Array(Set(Self.cameras(front: captureSettings.frontCamera).flatMap { Self.modes(for: $0) }))
+        let candidates = captureSettings.rearLens == .telephoto && !captureSettings.frontCamera
+            ? [device] : Self.cameras(front: captureSettings.frontCamera)
+        let modes = Array(Set(candidates.flatMap { Self.modes(for: $0) }))
             .sorted { ($0.quality.width, $0.fps, $0.dynamicRange.rawValue) < ($1.quality.width, $1.fps, $1.dynamicRange.rawValue) }
         let limits = zoomLimits(device)
         let low = limits.lowerBound / zoomScale
         let high = limits.upperBound / zoomScale
         let current = device.videoZoomFactor / zoomScale
-        let stops: [CGFloat] = [0.5, 1, 2].filter { $0 >= low - 0.01 && $0 <= high + 0.01 }
+        let telephoto = captureSettings.frontCamera ? nil : Self.telephotoBase()
+        var shortcutMinimum = low
+        var shortcutMaximum = high
+        var shortcutTelephoto = telephoto
+        if !capturePhase.blocksConfiguration && !captureSettings.frontCamera {
+            if captureSettings.rearLens == .telephoto,
+               let automatic = Self.camera(front: false, mode: captureSettings.captureMode == .video ? captureSettings.mode : nil) {
+                shortcutMinimum = automatic.minAvailableVideoZoomFactor / Self.displayZoomScale(automatic)
+            }
+            shortcutMaximum = max(high, (telephoto ?? 0) * 2)
+        } else if !device.isVirtualDevice && device.deviceType != .builtInTelephotoCamera {
+            shortcutTelephoto = nil
+        }
+        let stops = CameraZoom.stops(minimum: Double(shortcutMinimum), maximum: Double(shortcutMaximum),
+                                    telephoto: shortcutTelephoto.map { Double($0) }).map { CGFloat($0) }
+        let label = Self.lensLabel(device)
         let torchAvailable = device.hasTorch && device.isTorchAvailable
         let on = device.torchMode == .on
         let supportsLive = self.captureSettings.captureMode != .video && self.photoOutput.isLivePhotoCaptureSupported
@@ -510,10 +578,26 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             self.maximumZoom = high
             self.zoom = current
             self.zoomStops = stops
+            self.activeLensLabel = label
             self.hasTorch = torchAvailable
             self.torchOn = on
             self.livePhotoSupported = supportsLive
         }
+    }
+
+    func selectZoom(_ value: CGFloat) {
+        guard isReady, !isConfiguring else { return }
+        if canConfigure && !settings.frontCamera {
+            let wantsTelephoto = Self.telephotoBase().map { value >= $0 - 0.01 } ?? false
+            let lens: RearCameraLens = wantsTelephoto ? .telephoto : .automatic
+            if lens != settings.rearLens {
+                var requested = settings
+                requested.rearLens = lens
+                apply(requested, displayedZoom: value)
+                return
+            }
+        }
+        setZoom(value)
     }
 
     func setZoom(_ displayedZoom: CGFloat) {
@@ -714,7 +798,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
 
     private func newItem(kind: CaptureMode, location: CaptureLocation?) -> MediaItem {
         MediaItem(id: UUID(), kind: kind, createdAt: Date(),
-                  camera: captureSettings.frontCamera ? "前置摄像头" : "后置摄像头",
+                  camera: videoInput.map { Self.lensLabel($0.device) } ?? "相机",
                   resolution: kind == .video ? "\(captureSettings.quality.width) × \(captureSettings.quality.height)" : "待处理",
                   fps: kind == .video ? captureSettings.fps : nil,
                   dynamicRange: kind == .video ? captureSettings.dynamicRange.title : nil,
@@ -746,7 +830,8 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                 let folder = try MediaLibrary.begin(item)
                 let options = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
                 options.photoQualityPrioritization = .quality
-                options.isHighResolutionPhotoEnabled = true
+                options.maxPhotoDimensions = self.photoOutput.maxPhotoDimensions
+                if self.photoOutput.isContentAwareDistortionCorrectionSupported { options.isAutoContentAwareDistortionCorrectionEnabled = true }
                 if let location = location { options.metadata = location.gpsMetadata }
                 if live {
                     options.livePhotoMovieFileURL = folder.appendingPathComponent("live.mov")
@@ -1081,6 +1166,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
 
     private func setPhase(_ value: RecordingPhase) {
         capturePhase = value
+        if configured && (value == .recording || value == .idle) { publishCapabilities() }
         publish {
             self.phase = value
             // System / low-space stops also need time to finish the movie after

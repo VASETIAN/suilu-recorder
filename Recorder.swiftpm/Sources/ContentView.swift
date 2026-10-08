@@ -61,6 +61,11 @@ struct ContentView: View {
             setBlackScreen(false)
             UIApplication.shared.isIdleTimerDisabled = false
         }
+        .onReceive(NotificationCenter.default.publisher(for: RecorderLaunchRequest.notification)) { _ in
+            showSettings = false
+            showLibrary = false
+            setBlackScreen(false)
+        }
         .onChange(of: scenePhase) { value in
             if value != .active { setBlackScreen(false) }
             location.setEnabled(recorder.settings.includeLocation, foreground: value == .active)
@@ -69,7 +74,7 @@ struct ContentView: View {
         }
         .onChange(of: recorder.phase) { value in
             if value == .recording && recorder.settings.autoBlackScreen && scenePhase == .active { setBlackScreen(true) }
-            if value != .recording { setBlackScreen(false) }
+            if recorder.settings.captureMode == .video && value != .recording { setBlackScreen(false) }
             updateIdleTimer()
         }
         // A failure / low-space notice must be visible even if the content is black.
@@ -80,6 +85,8 @@ struct ContentView: View {
             location.setEnabled(value, foreground: scenePhase == .active)
         }
         .onChange(of: recorder.settings.dimBlackScreen) { _ in setBlackScreen(isBlack) }
+        .onChange(of: recorder.settings.captureMode) { _ in setBlackScreen(false) }
+        .onChange(of: recorder.isReady) { ready in if !ready { setBlackScreen(false) } }
     }
 
     private var header: some View {
@@ -95,6 +102,7 @@ struct ContentView: View {
                 }
                 Text(recorder.settings.captureMode == .video ? recorder.settings.mode.title : recorder.settings.captureMode.title)
                     .font(.caption.weight(.medium)).foregroundStyle(.white.opacity(0.8)).lineLimit(1)
+                Text(recorder.activeLensLabel).font(.caption2).foregroundStyle(.white.opacity(0.65))
                 Text("剩余 \(RecorderFiles.sizeLabel(recorder.availableSpace))")
                     .font(.caption).foregroundStyle(.white.opacity(0.75))
                 if recorder.settings.includeLocation {
@@ -195,7 +203,7 @@ struct ContentView: View {
             }
             HStack(spacing: 10) {
                 ForEach(recorder.zoomStops, id: \.self) { value in
-                    Button { recorder.setZoom(value) } label: {
+                    Button { recorder.selectZoom(value) } label: {
                         Text(zoomLabel(value))
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(abs(recorder.zoom - value) < 0.08 ? .yellow : .white)
@@ -205,12 +213,9 @@ struct ContentView: View {
                     .disabled(!recorder.isReady || recorder.isConfiguring)
                     .accessibilityLabel("变焦 \(zoomLabel(value))")
                 }
-                Text(String(format: "%.1f×", Double(recorder.zoom)))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.7))
-                    .accessibilityLabel("当前倍率 \(Double(recorder.zoom), specifier: "%.1f") 倍")
             }
             .frame(height: 44)
+            .accessibilityValue("当前倍率 \(Double(recorder.zoom), specifier: "%.1f") 倍")
             HStack(spacing: 24) {
                 cameraButton(symbol: "photo.on.rectangle.angled", title: "相册", enabled: recorder.canConfigure) {
                     showLibrary = true
@@ -232,14 +237,7 @@ struct ContentView: View {
     }
 
     private var captureButton: some View {
-        Button {
-            if recorder.phase == .recording { recorder.stopRecording() }
-            else if recorder.canRecord {
-                let position = recorder.settings.includeLocation ? location.snapshot() : nil
-                if recorder.settings.captureMode == .video { recorder.startRecording(location: position) }
-                else { recorder.takePhoto(location: position) }
-            }
-        } label: {
+        Button(action: capture) {
             ZStack {
                 Circle().stroke(.white, lineWidth: 4).frame(width: 76, height: 76)
                 if recorder.phase == .recording {
@@ -256,6 +254,18 @@ struct ContentView: View {
         .accessibilityLabel(recorder.phase == .recording ? "停止录像并保存到内置图库" : recorder.settings.captureMode == .video ? "开始录像" : "拍摄并保存到内置图库")
     }
 
+    private func capture() {
+        if recorder.phase == .recording { recorder.stopRecording() }
+        else if recorder.canRecord {
+            let position = recorder.settings.includeLocation ? location.snapshot() : nil
+            if recorder.settings.captureMode == .video { recorder.startRecording(location: position) }
+            else {
+                recorder.takePhoto(location: position)
+                if isBlack { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+            }
+        }
+    }
+
     private func cameraButton(symbol: String, title: String, enabled: Bool,
                               action: @escaping () -> Void) -> some View {
         Button(action: action) {
@@ -269,31 +279,45 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var blackScreen: some View {
+        let isPhoto = recorder.settings.captureMode != .video
         let surface = Color.black.ignoresSafeArea().contentShape(Rectangle())
-            .accessibilityLabel("黑屏录像中")
-            .accessibilityHint("\(recorder.settings.recovery.title)恢复相机界面；录像仍在进行。")
+            .accessibilityLabel(isPhoto ? "黑屏拍照" : "黑屏录像中")
+            .accessibilityHint(isPhoto ? "单击拍照，长按恢复界面。" : "\(recorder.settings.recovery.title)恢复相机界面；录像仍在进行。")
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { setBlackScreen(false) }
-        switch recorder.settings.recovery {
-        case .singleTap: surface.onTapGesture { setBlackScreen(false) }
-        case .doubleTap: surface.onTapGesture(count: 2) { setBlackScreen(false) }
-        case .longPress: surface.onLongPressGesture(minimumDuration: 0.8) { setBlackScreen(false) }
+        if isPhoto {
+            surface.gesture(LongPressGesture(minimumDuration: 0.8).exclusively(before: TapGesture()).onEnded { value in
+                switch value {
+                case .first: setBlackScreen(false)
+                case .second: capture()
+                }
+            })
+            .accessibilityAction(named: Text("拍照"), capture)
+        } else {
+            switch recorder.settings.recovery {
+            case .singleTap: surface.onTapGesture { setBlackScreen(false) }
+            case .doubleTap: surface.onTapGesture(count: 2) { setBlackScreen(false) }
+            case .longPress: surface.onLongPressGesture(minimumDuration: 0.8) { setBlackScreen(false) }
+            }
         }
     }
 
     private func setBlackScreen(_ requested: Bool) {
-        let enabled = requested && scenePhase == .active && recorder.phase == .recording
+        let allowed = recorder.settings.captureMode == .video ? recorder.phase == .recording
+            : recorder.isReady && !recorder.isConfiguring
+        let enabled = requested && scenePhase == .active && allowed
         // Set physical brightness in the action itself, before showing the black
         // surface. Every entry/exit path uses this function, including auto entry.
         if enabled && recorder.settings.dimBlackScreen { brightness.dim() }
         else { brightness.restore() }
         isBlack = enabled
+        updateIdleTimer()
     }
 
     private func updateIdleTimer() {
-        UIApplication.shared.isIdleTimerDisabled = scenePhase == .active && recorder.phase.blocksConfiguration
+        UIApplication.shared.isIdleTimerDisabled = scenePhase == .active && (recorder.phase.blocksConfiguration || isBlack)
     }
-    private func zoomLabel(_ value: CGFloat) -> String { value == 0.5 ? "0.5×" : "\(Int(value))×" }
+    private func zoomLabel(_ value: CGFloat) -> String { String(format: "%g×", Double(value)) }
     private func openSystemSettings() {
         if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
     }
