@@ -6,7 +6,6 @@ struct RecorderApp: App {
     var body: some Scene {
         WindowGroup {
             RecorderLaunchView()
-                .preferredColorScheme(.dark)
                 .tint(.red)
         }
     }
@@ -28,7 +27,7 @@ private struct RecorderLaunchView: View {
                     if ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1" {
                         Button("预览相机") { recorder = RecorderController() }.buttonStyle(.borderedProminent)
                     } else { ProgressView("正在打开相机…").tint(.white) }
-                }
+                }.preferredColorScheme(.dark)
             }
         }
         .task {

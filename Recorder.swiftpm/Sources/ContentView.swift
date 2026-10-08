@@ -53,6 +53,7 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(ScreenPrivacyAnchor(enabled: recorder.settings.obscureAppSwitcher))
+        .preferredColorScheme(recorder.settings.interfaceMode == .browser ? .light : .dark)
         .statusBarHidden(isBlack)
         .persistentSystemOverlays(isBlack ? .hidden : .automatic)
         .sheet(isPresented: $showSettings) {

@@ -8,6 +8,7 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
     @Published var canGoForward = false
     @Published var notice: String?
     @Published var siteLabel = "小黑盒官方网页"
+    @Published var isCommunityPage = true
 
     lazy var webView: WKWebView = {
         let configuration = WKWebViewConfiguration()
@@ -27,25 +28,35 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
             style.textContent = `
                 body:has(:is(#page-bbs-community, #page-bbs-link)) #app > nav,
                 #page-bbs-community > .bbs-community__search-module { display:none!important; }
+                #page-bbs-community::before, #page-bbs-community::after,
+                #page-bbs-community .list::before, #page-bbs-community .list::after { content:none!important; display:none!important; }
                 body:has(:is(#page-bbs-community, #page-bbs-link)) { min-width:0!important; margin:0!important; }
-                    body:has(:is(#page-bbs-community, #page-bbs-link)) #app { min-width:0!important; width:100%!important; }
-                    body:has(:is(#page-bbs-community, #page-bbs-link)) #app > main { padding:0!important; }
-                    :is(#page-bbs-community, #page-bbs-link) { width:100%!important; max-width:720px!important; margin:0 auto!important; padding:0!important; }
-                    :is(#page-bbs-community, #page-bbs-link) > .content { display:block!important; }
-                    :is(#page-bbs-community, #page-bbs-link) > .content > .list { width:100%!important; min-width:0!important; }
-                    :is(#page-bbs-community, #page-bbs-link) > .content > .right { display:none!important; }
-                    #page-bbs-community .bbs-home__topic-list-wrapper { padding:12px 0!important; }
-                    #page-bbs-community .hb-cpt__pagination-outer { overflow-x:auto!important; }
-                    #page-bbs-community .hb-cpt__pagination-inner { width:max-content!important; transform:none!important; }
-                    #page-bbs-community .hb-cpt__pagination--right,
-                    #page-bbs-community .hb-cpt__pagination--left { display:none!important; }
-                    #page-bbs-community .bbs-home__content-item { padding:16px!important; }
-                    #page-bbs-community .bbs-content__title { font-size:17px!important; line-height:1.5!important; }
-                    #page-bbs-community .bbs-content__imgs-wrapper { display:flex!important; gap:6px; height:auto!important; overflow:hidden; }
-                    #page-bbs-community .bbs-content__image { position:relative!important; inset:auto!important; width:auto!important; height:auto!important; flex:1 1 0; min-width:0; aspect-ratio:1; }
-                    #page-bbs-community .bbs-content__video_wrapper { max-width:100%!important; }
-                    #page-bbs-link .hb-bbs-link { width:100%!important; box-sizing:border-box!important; }
-                    #page-bbs-link .hb-bbs-link img { max-width:100%!important; }
+                body:has(:is(#page-bbs-community, #page-bbs-link)) #app { min-width:0!important; width:100%!important; }
+                body:has(:is(#page-bbs-community, #page-bbs-link)) #app > main { padding:0!important; }
+                :is(#page-bbs-community, #page-bbs-link) { width:100%!important; max-width:720px!important; margin:0 auto!important; padding:0!important; }
+                :is(#page-bbs-community, #page-bbs-link) > .content { display:block!important; }
+                :is(#page-bbs-community, #page-bbs-link) > .content > .list { width:100%!important; min-width:0!important; }
+                :is(#page-bbs-community, #page-bbs-link) > .content > .right { display:none!important; }
+                #page-bbs-community .hb-bbs-home { padding:0!important; }
+                #page-bbs-community .bbs-home__topic-list-wrapper { padding:8px 12px!important; margin-bottom:0!important; }
+                #page-bbs-community .bbs-home__topic-list { height:auto!important; padding:4px 0 8px!important; }
+                #page-bbs-community .bbs-home__topic-item { width:66px!important; }
+                #page-bbs-community .bbs-home__topic-item-icon { width:36px!important; height:36px!important; border-radius:8px!important; }
+                #page-bbs-community .hb-cpt__pagination-outer { overflow-x:auto!important; }
+                #page-bbs-community .hb-cpt__pagination-inner { width:max-content!important; transform:none!important; }
+                #page-bbs-community .hb-cpt__pagination--right,
+                #page-bbs-community .hb-cpt__pagination--left { display:none!important; }
+                #page-bbs-community .hb-bbs-home__splitline::after,
+                #page-bbs-community .hb-bbs-home__feed-splitline::after { left:0!important; width:100%!important; }
+                #page-bbs-community .bbs-home__content-list { padding:0!important; }
+                #page-bbs-community .bbs-home__content-item { padding:0!important; }
+                #page-bbs-community .hb-cpt__bbs-list-content { padding:14px 16px!important; }
+                #page-bbs-community .bbs-content__title { font-size:17px!important; line-height:1.5!important; }
+                #page-bbs-community .bbs-content__imgs-wrapper { display:flex!important; gap:6px; height:auto!important; overflow:hidden; }
+                #page-bbs-community .bbs-content__image { position:relative!important; inset:auto!important; width:auto!important; height:auto!important; flex:1 1 0; min-width:0; aspect-ratio:1; }
+                #page-bbs-community .bbs-content__video_wrapper { max-width:100%!important; }
+                #page-bbs-link .hb-bbs-link { width:100%!important; box-sizing:border-box!important; }
+                #page-bbs-link .hb-bbs-link img { max-width:100%!important; }
             `;
             document.documentElement.appendChild(style);
         }
@@ -56,6 +67,7 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
         view.navigationDelegate = self
         view.uiDelegate = self
         view.allowsBackForwardNavigationGestures = true
+        view.scrollView.contentInsetAdjustmentBehavior = .never
         return view
     }()
 
@@ -82,7 +94,9 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
         canGoBack = webView.canGoBack
         canGoForward = webView.canGoForward
         if let host = webView.url?.host {
-            siteLabel = ["www.xiaoheihe.cn", "xiaoheihe.cn"].contains(host) ? "小黑盒官方网页" : host
+            let official = ["www.xiaoheihe.cn", "xiaoheihe.cn"].contains(host)
+            siteLabel = official ? "小黑盒官方网页" : host
+            isCommunityPage = official && webView.url?.path.hasPrefix("/app/bbs/") == true
         }
     }
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
@@ -140,51 +154,68 @@ struct BrowserView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 6) {
-                Text("畅游").font(.headline)
-                TextField("搜索内容或输入网址", text: $searchText)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    .submitLabel(.search).focused($searchFocused)
-                    .onSubmit(submitSearch)
-                    .padding(10).background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
-                    .accessibilityLabel("网页搜索或网址")
-                Button(action: submitSearch) { Image(systemName: "magnifyingglass").frame(width: 44, height: 44) }
-                    .accessibilityLabel("搜索或打开网址")
-                Button(action: settings) { Image(systemName: "gearshape").frame(width: 44, height: 44) }
-                    .accessibilityLabel("设置")
+            HStack(spacing: 10) {
+                Text("畅游").font(.system(size: 20, weight: .semibold))
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass").font(.system(size: 15)).foregroundStyle(.secondary)
+                    TextField("搜索或输入网址", text: $searchText)
+                        .font(.system(size: 15))
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        .submitLabel(.search).focused($searchFocused)
+                        .onSubmit(submitSearch).accessibilityLabel("网页搜索或网址")
+                }
+                .padding(.horizontal, 12).frame(height: 40)
+                .background(Color(white: 0.95), in: Capsule())
+                Menu {
+                    Text(browser.siteLabel)
+                    Button(action: browser.back) { Label("返回上一页", systemImage: "chevron.left") }.disabled(!browser.canGoBack)
+                    Button(action: browser.forward) { Label("前进一页", systemImage: "chevron.right") }.disabled(!browser.canGoForward)
+                    Button(action: browser.reloadOrStop) { Label(browser.loading ? "停止加载" : "刷新网页", systemImage: "arrow.clockwise") }
+                    Button(action: browser.home) { Label("回到社区首页", systemImage: "house") }
+                } label: {
+                    Image(systemName: "ellipsis").frame(width: 44, height: 44)
+                }.accessibilityLabel("网页导航菜单")
             }
-            .padding(.horizontal, 12).padding(.bottom, 8)
-            .background(Color(white: 0.08))
+            .padding(.leading, 16).padding(.trailing, 6).padding(.vertical, 6)
+            if !browser.isCommunityPage {
+                Text(browser.siteLabel).font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1).padding(.horizontal, 16).padding(.bottom, 6)
+            }
+            Divider()
             if browser.loading { ProgressView().progressViewStyle(.linear).tint(.gray) }
             if let notice = browser.notice {
                 HStack {
                     Text(notice).font(.caption)
                     Spacer()
                     Button("关闭") { browser.notice = nil }.frame(minHeight: 44)
-                }.padding(.horizontal, 12).background(Color(white: 0.15))
+                }.padding(.horizontal, 16).background(Color(white: 0.95))
             }
-            RecorderWebPage(browser: browser)
-            HStack(spacing: 16) {
-                Button(action: browser.home) { Image(systemName: "house").frame(width: 44, height: 44) }
-                    .accessibilityLabel("社区首页")
-                Button(action: browser.back) { Image(systemName: "chevron.left").frame(width: 44, height: 44) }
-                    .disabled(!browser.canGoBack).accessibilityLabel("上一页")
-                Button(action: browser.forward) { Image(systemName: "chevron.right").frame(width: 44, height: 44) }
-                    .disabled(!browser.canGoForward).accessibilityLabel("下一页")
-                Spacer()
-                Text(browser.siteLabel).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                Button(action: browser.reloadOrStop) {
-                    Image(systemName: browser.loading ? "xmark" : "arrow.clockwise").frame(width: 44, height: 44)
-                }.accessibilityLabel(browser.loading ? "停止加载网页" : "刷新网页")
-            }.padding(.horizontal, 12).background(Color(white: 0.08))
+            RecorderWebPage(browser: browser).frame(maxWidth: .infinity, maxHeight: .infinity)
+            Divider()
+            HStack(spacing: 0) {
+                tab("社区", symbol: "square.grid.2x2", selected: browser.isCommunityPage && !searchFocused, action: browser.home)
+                tab("浏览", symbol: "safari", selected: !browser.isCommunityPage || searchFocused) { searchFocused = true }
+                tab("设置", symbol: "gearshape", selected: false, action: settings)
+            }.padding(.vertical, 6)
         }
-        .background(Color.black).foregroundStyle(.white)
+        .background(Color.white.ignoresSafeArea()).foregroundStyle(Color(white: 0.12)).tint(Color(white: 0.12))
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .onAppear { browser.startIfNeeded() }
         .onDisappear { browser.pauseMedia() }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
             browser.pauseMedia()
         }
+    }
+
+    private func tab(_ title: String, symbol: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Image(systemName: symbol).font(.system(size: 21, weight: selected ? .semibold : .regular))
+                Text(title).font(.system(size: 11, weight: selected ? .semibold : .regular))
+            }
+            .frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
+            .foregroundStyle(selected ? Color(white: 0.12) : Color(white: 0.5))
+        }.buttonStyle(.plain)
     }
 
     private func submitSearch() {

@@ -53,7 +53,7 @@ struct SettingsView: View {
                         Button("开始录像并返回浏览", action: startBrowsingRecording)
                             .disabled(!recorder.canRecord)
                     }
-                    Text("浏览主页只显示帖子、搜索和网页导航。开始、计时和停止都在这里；停止时保存到内置图库。录像需你手动开启，系统相机和麦克风隐私指示正常显示。")
+                    Text("浏览主页只显示帖子和搜索，底部‘设置’可随时回到这里。开始、计时和停止都在设置中；停止时保存到内置图库。录像需你手动开启，系统相机和麦克风隐私指示正常显示。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("界面形态") {
@@ -184,7 +184,7 @@ struct SettingsView: View {
                 }
 
                 Section("关于畅游") {
-                    LabeledContent("版本", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.4.1")
+                    LabeledContent("版本", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.4.2")
                     Text("使用 Apple 原生拍摄、画质优先处理、自动白平衡和支持时的镜头畸变校正。原照片直接保存，App 不加美颜或 AI 滤镜。系统是否使用多帧融合等处理由设备和场景决定，成片不保证与系统相机所有模式一致。")
                         .font(.caption).foregroundStyle(.secondary)
                     Text("开始前选择长焦倍率会使用真实长焦镜头；受格式能力限制，可能自动降低帧率。4K120 通常需要主摄。其他倍率可能是传感器裁切或数字变焦。照片 JPEG、视频 MOV，Live Photo 保留配对文件。")
