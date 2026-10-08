@@ -39,7 +39,8 @@ enum CameraControlDestination: String, AppEnum {
 struct OpenCameraControlIntent: OpenIntent {
     static var title: LocalizedStringResource = "开启随心记相机"
     static var openAppWhenRun: Bool = true
-    @Parameter(title: "界面") var target: CameraControlDestination = .camera
+    @Parameter(title: "界面") var target: CameraControlDestination
+    init() { target = .camera }
     @MainActor
     func perform() async throws -> some IntentResult {
         RecorderLaunchRequest.request()
