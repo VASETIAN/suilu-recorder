@@ -98,9 +98,11 @@ final class LayoutCheck: NSObject, WKNavigationDelegate {
     }
     func fail(_ reason: String) { print("FAIL: \(reason)"); exit(1) }
 }
-let check = LayoutCheck()
-DispatchQueue.main.async { check.run() }
-DispatchQueue.main.asyncAfter(deadline: .now() + 25) { check.fail("WebKit check timed out") }
+DispatchQueue.main.async {
+    let check = LayoutCheck()
+    check.run()
+    DispatchQueue.main.asyncAfter(deadline: .now() + 25) { check.fail("WebKit check timed out") }
+}
 app.run()
 '''.replace('ADAPTER', script).replace('FIXTURE', html)
     output.parent.mkdir(parents=True, exist_ok=True)
