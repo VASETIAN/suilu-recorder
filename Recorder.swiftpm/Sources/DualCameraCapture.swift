@@ -256,6 +256,17 @@ final class DualCameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         }
     }
 
+    func detach() {
+        // Release device connections before configuring the next capture session.
+        if session.isRunning { session.stopRunning() }
+        session.beginConfiguration()
+        for connection in session.connections { session.removeConnection(connection) }
+        for output in session.outputs { session.removeOutput(output) }
+        for input in session.inputs { session.removeInput(input) }
+        session.commitConfiguration()
+        rearInput = nil; frontInput = nil; latestFront = nil
+    }
+
     func start(url: URL, orientation: AVCaptureVideoOrientation, metadata: [AVMetadataItem],
                began: @escaping () -> Void, finished: @escaping (URL, Error?) -> Void) {
         generation += 1

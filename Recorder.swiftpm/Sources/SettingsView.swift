@@ -20,7 +20,7 @@ struct SettingsView: View {
         _draft = State(initialValue: recorder.settings)
     }
 
-    private var modes: [VideoMode] { draft.dualCapture ? recorder.dualCaptureModes : recorder.supportedModes }
+    private var modes: [VideoMode] { draft.dualCapture ? recorder.dualCaptureModes : recorder.singleCaptureModes }
 
     private var qualities: [VideoQuality] {
         VideoQuality.allCases.filter { quality in modes.contains { $0.quality == quality } }

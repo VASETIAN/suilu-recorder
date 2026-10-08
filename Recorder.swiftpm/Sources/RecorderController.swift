@@ -16,6 +16,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     @Published private(set) var isReady = false
     @Published private(set) var isConfiguring = false
     @Published private(set) var supportedModes: [VideoMode] = []
+    @Published private(set) var singleCaptureModes: [VideoMode] = []
     @Published private(set) var zoom: CGFloat = 1
     @Published private(set) var zoomStops: [CGFloat] = [1]
     @Published private(set) var minimumZoom: CGFloat = 1
@@ -313,6 +314,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             let previous = captureSettings
             turnTorchOff()
             if activeSession.isRunning { activeSession.stopRunning() }
+            dualRecorder?.detach()
             dualRecorder = nil
             publish { self.dualPreview = nil }
             session.beginConfiguration()
@@ -641,8 +643,9 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         guard let device = videoInput?.device else { return }
         let candidates = captureSettings.rearLens == .telephoto && !captureSettings.frontCamera
             ? [device] : Self.cameras(front: captureSettings.frontCamera)
-        let modes = dualRecorder != nil ? dualCaptureModes : Array(Set(candidates.flatMap { Self.modes(for: $0) }))
+        let singleModes = Array(Set(candidates.flatMap { Self.modes(for: $0) }))
             .sorted { ($0.quality.width, $0.fps, $0.dynamicRange.rawValue) < ($1.quality.width, $1.fps, $1.dynamicRange.rawValue) }
+        let modes = dualRecorder != nil ? dualCaptureModes : singleModes
         let limits = zoomLimits(device)
         let low = limits.lowerBound / zoomScale
         let high = limits.upperBound / zoomScale
@@ -668,6 +671,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         let supportsLive = self.captureSettings.captureMode != .video && self.photoOutput.isLivePhotoCaptureSupported
         publish {
             self.supportedModes = modes
+            self.singleCaptureModes = singleModes
             self.minimumZoom = low
             self.maximumZoom = high
             self.zoom = current
