@@ -103,34 +103,34 @@
       "filename": "ipad-167.png"
     },
     {
-      "idiom": "ios-marketing",
+      "idiom": "universal",
       "size": "1024x1024",
-      "scale": "1x",
-      "filename": "ios-marketing-1024.png"
+      "filename": "ios-marketing-1024.png",
+      "platform": "ios"
     },
     {
-      "idiom": "ios-marketing",
+      "idiom": "universal",
       "size": "1024x1024",
-      "scale": "1x",
       "filename": "ios-marketing-dark.png",
       "appearances": [
         {
           "appearance": "luminosity",
           "value": "dark"
         }
-      ]
+      ],
+      "platform": "ios"
     },
     {
-      "idiom": "ios-marketing",
+      "idiom": "universal",
       "size": "1024x1024",
-      "scale": "1x",
       "filename": "ios-marketing-tinted.png",
       "appearances": [
         {
           "appearance": "luminosity",
           "value": "tinted"
         }
-      ]
+      ],
+      "platform": "ios"
     }
   ],
   "info": {

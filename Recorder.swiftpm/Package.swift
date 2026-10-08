@@ -11,7 +11,7 @@ let package = Package(
             targets: ["AppModule"],
             bundleIdentifier: "com.tians.recorder",
             displayVersion: "2.3.0",
-            bundleVersion: "9",
+            bundleVersion: "10",
             appIcon: .asset("AppIcon"),
             accentColor: .presetColor(.red),
             supportedDeviceFamilies: [.pad, .phone],
