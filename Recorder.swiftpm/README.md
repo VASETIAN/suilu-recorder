@@ -1,13 +1,13 @@
-# 随录 Recorder 2.2.0
+# 随录 Recorder 2.2.1
 
 个人拍摄工具 App Playground：录像、普通照片、Live Photo、内置图库、拍摄定位、黑屏模式及系统允许时的可见画中画。最低 iOS / iPadOS 16.0；控制中心入口取决于系统版本及独立安装状态。
 
 ## 导入和升级
 
-1. 将 **Recorder-2.2.0.swiftpm.zip** 保存到 iPad「文件」，解压到新文件夹。
+1. 将 **Recorder-2.2.1.swiftpm.zip** 保存到 iPad「文件」，解压到新文件夹。
 2. 在 Swift Playgrounds 的「浏览」中打开整个 **Recorder.swiftpm**，点击运行，再点「开启相机」。无需改代码。
 3. 按提示允许相机、需要声音时允许麦克风、需要拍摄位置时允许定位。**向系统照片添加权限仅在你主动导出时请求。**
-4. 在设置「关于随录」确认版本为 **2.2.0**。
+4. 在设置「关于随录」确认版本为 **2.2.1**。
 
 旧工程请先保留。若升级复用同一应用数据目录，会读取旧设置并将旧版未保存录像移入图库；如果 Playgrounds 为新工程使用了不同数据目录，旧工程里的文件不会自动跨目录迁移，请先在旧工程导出。已在系统照片里的内容不受影响。
 
@@ -42,7 +42,7 @@
 
 ## 返回相机、画中画和多任务
 
-在 **录像** 模式开始录像后，主界面的 **画中画** 按钮显示当前支持状态。显示“可以开启画中画”时，点击按钮，等正常尺寸的实时小窗出现后，再返回主屏幕或使用其他 App。小窗保留实时画面和红色 REC 标识，使用系统的移动、缩放和关闭控件，不添加隐藏窗口。
+在 **录像** 模式开始录像后，倍率旁的 **画中画** 圆形按钮显示在拍照页面 LIVE 开关的同一位置，倍率行下方显示当前支持状态。显示“可以开启画中画”时，点击按钮，等正常尺寸的实时小窗出现后，再返回主屏幕或使用其他 App。小窗保留实时画面和红色 REC 标识，使用系统的移动、缩放和关闭控件，不添加隐藏窗口。
 
 启用需同时满足：设备支持画中画、运行 App 加载了 `UIBackgroundModes: audio` 声明、AVKit 认为当前内容可进入画中画，以及相机会话报告支持并启用了多任务相机。工程通过 SwiftPM 的 `additionalInfoPlistContentFilePath` 合并 AdditionalInfo.plist；没有添加 VoIP 或通话服务。只在已有录像时开启，照片和 Live Photo 不使用后台拍摄。
 
@@ -64,15 +64,13 @@
 
 ## 检查范围
 
-本次使用官方 Swift 5.10.1 编译器解析清单及全部 13 个源文件，并检查全工程语法树、异步条件、图标、资源、清单、额外 plist 和 ZIP。直接提取生产生命周期及画中画资格判断方法，使用队列 / 会话替身检查：有效画中画继续、未开启时停止、关闭后台小窗后保存、前台返回、能力拒绝、相机中断、迟到回调和最长 5 秒启动过渡。2.1.0 在同一画中画回放场景失败，本版通过；原有返回相机时序检查保持通过。
+2.2.1 已在 GitHub Actions 的标准 macOS 环境中使用 Xcode 26.3 和真实 iPhoneOS SDK 完成全应用编译、链接、图标资源编译与 App Intents 元数据提取，构建结果 BUILD SUCCEEDED。构建使用本工程实际 Swift 源码，由仓库内脚本生成常规 Xcode 工程。它证明 iOS 源码构建通过；Swift Playgrounds 宿主里的打开与权限行为仍需实测。
 
-**没有 Apple iOS SDK，没有对整个 App 完成 iOS 类型检查或构建，也未在 iPad / iPhone 实测本版。**上述回放不执行 AVKit，不证明真实小窗、相机、Playgrounds 宿主或设备续录成功。此前图库 / 设置 / 坐标和亮度逻辑检查使用平台替身，相关实现保留，未把旧检查算作本次设备验证。完整范围及待测步骤见压缩包旁“验证结果.md”。
+成功记录：[iPhone 2.2.1 构建](https://github.com/VASETIAN/suilu-recorder/actions/runs/37735784824)；源码提交 `7932833df8fe3346e42de159e619d2051c8c771b`。输出为真正的 arm64 iPhoneOS IPA，未签名，需在 Windows 使用自己的 Apple 账号签名后安装。
 
-Mac 上可用 Xcode 打开 App Playground；只检查源文件类型时可执行：
+本机另外检查全工程语法树、异步条件、图标、资源、清单、附加 plist 和 ZIP。此前 2.2.0 的录制状态及画中画资格判断回放已通过，2.2.1 仅调整按钮位置与版本，未重复未修改逻辑的回放。
 
-```sh
-xcrun swiftc -parse-as-library -typecheck -swift-version 5 -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" -target arm64-apple-ios16.0 Sources/*.swift
-```
+尚未完成 iPad / iPhone 真机拍摄测试。构建成功不证明某台设备支持画中画持续摄像，也不证明实际编码、GPS、Photos 导出与系统中断行为。完整范围见压缩包旁“验证结果.md”。
 
 ## Apple / Swift 依据
 
@@ -95,3 +93,5 @@ xcrun swiftc -parse-as-library -typecheck -swift-version 5 -sdk "$(xcrun --sdk i
 - [Apple：画中画中的相机内容与生命周期](https://developer.apple.com/documentation/avkit/adopting-picture-in-picture-for-video-calls)
 - [Apple：画中画控制器和背景音频声明](https://developer.apple.com/documentation/avkit/avpictureinpicturecontroller)
 - [SwiftPM：附加 Info.plist 的原生清单接口](https://github.com/swiftlang/swift-package-manager/blob/main/Sources/AppleProductTypes/Product.swift)
+
+2.2.1 将画中画入口移到录像页面的倍率行，与拍照页面的 LIVE 按钮共用位置；通过完整 iPhoneOS 构建并提供真实设备安装包。
