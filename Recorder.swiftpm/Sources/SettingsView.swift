@@ -117,7 +117,7 @@ struct SettingsView: View {
                 Section("快捷启动") {
                     Text("Swift Playgrounds 运行：可将控制中心的“打开 App”设为 Swift Playgrounds，再进入此工程运行。系统不把运行预览注册成独立 App。")
                         .font(.subheadline)
-                    Text("独立安装随心记后：控制中心可选择“打开 App → 随心记”；也可把快捷指令“开启随心记相机”加入控制中心。快捷入口只在前台打开相机，不会在后台或锁屏摄像。")
+                    Text("独立安装版（iOS 18 及以上）：先打开一次 App，再进入控制中心，长按空白处 → 添加控制 → 搜索“随心记” → 选择“随心记相机”。位置由你选择；也可将“开启随心记相机”快捷指令用于操作按钮。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
 

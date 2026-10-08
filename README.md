@@ -15,3 +15,5 @@ Actions → Build iPhone App → 选择成功的运行 → 下载 Recorder-iPhon
 源码公开以使用 GitHub 公共仓库的免费标准运行环境。构建产物仅保留 3 天，可重新触发构建；应用录制内容保存在设备中，不进入本仓库。
 
 完整功能及导入说明见 [工程 README](Recorder.swiftpm/README.md)。
+
+2.4.0 安装版包含原生控制中心扩展，iOS 18 及以上在控制中心「添加控制」中搜索「随心记」。`Controls/` 是扩展源文件，`tools/generate_project.py` 创建含 App 与扩展的原生项目；Swift Playgrounds 的 `.swiftpm` 本身仅运行 App，不能安装这个扩展。
