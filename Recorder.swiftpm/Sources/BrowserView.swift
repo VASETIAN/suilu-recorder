@@ -21,15 +21,17 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
         if (location.hostname === 'www.xiaoheihe.cn' || location.hostname === 'xiaoheihe.cn') {
             const style = document.createElement('style');
             style.textContent = `
-                body:has(#page-bbs-community) #app > nav,
+                body:has(:is(#page-bbs-community, #page-bbs-link)) #app > nav,
                 #page-bbs-community > .bbs-community__search-module { display:none!important; }
                 @media (max-width:700px) {
-                    body:has(#page-bbs-community) #app { min-width:0!important; width:100%!important; }
-                    body:has(#page-bbs-community) #app > main { padding:0!important; }
-                    #page-bbs-community { width:100%!important; margin:0!important; padding:0!important; }
-                    #page-bbs-community > .content { display:block!important; }
-                    #page-bbs-community > .content > .list { width:100%!important; min-width:0!important; }
-                    #page-bbs-community > .content > .right { display:none!important; }
+                    body:has(:is(#page-bbs-community, #page-bbs-link)) #app { min-width:0!important; width:100%!important; }
+                    body:has(:is(#page-bbs-community, #page-bbs-link)) #app > main { padding:0!important; }
+                    :is(#page-bbs-community, #page-bbs-link) { width:100%!important; margin:0!important; padding:0!important; }
+                    :is(#page-bbs-community, #page-bbs-link) > .content { display:block!important; }
+                    :is(#page-bbs-community, #page-bbs-link) > .content > .list { width:100%!important; min-width:0!important; }
+                    :is(#page-bbs-community, #page-bbs-link) > .content > .right { display:none!important; }
+                    #page-bbs-link .hb-bbs-link { width:100%!important; box-sizing:border-box!important; }
+                    #page-bbs-link .hb-bbs-link img { max-width:100%!important; }
                 }
             `;
             document.documentElement.appendChild(style);

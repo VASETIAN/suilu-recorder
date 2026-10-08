@@ -47,6 +47,10 @@ def build(controller: Path, output: Path):
     harness = r'''
 import Foundation
 enum ScenePhase { case active, inactive, background }
+enum RecorderLaunchRequest {
+    static var isPending = false
+    static func consume() -> Bool { let value = isPending; isPending = false; return value }
+}
 final class ReplayQueue {
     var pending: [() -> Void] = []
     func async(_ work: @escaping () -> Void) { pending.append(work) }
@@ -391,9 +395,11 @@ final class ReplayView {
     var leavingSnapshotTaken = false
     func setBlackScreen(_ value: Bool) { isBlack = value }
     func reconcile() { restoreOrResumeCapture() }
+    func launch() { handleCameraLaunchRequest() }
     func leave() { rememberBlackBeforeLeaving(); setBlackScreen(false) }
     VIEW_METHOD
     SNAPSHOT_METHOD
+    LAUNCH_METHOD
 }
 let uiResume = ReplayView()
 uiResume.recorder.captureSettings.resumeAfterBackground = true
@@ -434,8 +440,18 @@ let photoBrowser = Recorder()
 photoBrowser.captureSettings.captureMode = "photo"; photoBrowser.setInterfaceMode(.browser)
 assert(photoBrowser.settings.captureMode == "video" && photoBrowser.settings.interfaceMode == .browser)
 print("PASS: production interface switching preserves ongoing video/session, blocks finishing, and changes photo output before browsing")
+let launchView = ReplayView()
+launchView.recorder.settings.interfaceMode = .browser
+launchView.recorder.isConfiguring = true; RecorderLaunchRequest.isPending = true
+launchView.launch()
+assert(RecorderLaunchRequest.isPending && launchView.recorder.settings.interfaceMode == .browser)
+launchView.recorder.isConfiguring = false; launchView.recorder.phase = .finishing; launchView.launch()
+assert(RecorderLaunchRequest.isPending)
+launchView.recorder.phase = .idle; launchView.launch(); launchView.recorder.pump()
+assert(!RecorderLaunchRequest.isPending && launchView.recorder.settings.interfaceMode == .camera)
+print("PASS: control launch waits through configuration/save before consuming the request and returning to camera")
 print("Replay uses fake session and queues; AVKit, Apple SDK and physical device behavior are not tested.")
-'''.replace('METHODS', '\n'.join(methods)).replace('VIEW_METHOD', extract(view, 'private func restoreOrResumeCapture()')).replace('SNAPSHOT_METHOD', extract(view, 'private func rememberBlackBeforeLeaving()'))
+'''.replace('METHODS', '\n'.join(methods)).replace('VIEW_METHOD', extract(view, 'private func restoreOrResumeCapture()')).replace('SNAPSHOT_METHOD', extract(view, 'private func rememberBlackBeforeLeaving()')).replace('LAUNCH_METHOD', extract(view, 'private func handleCameraLaunchRequest()'))
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(phase + '\n' + pip + '\n' + extract(settings, 'enum RecorderInterface:') + '\n' + extract(settings, 'enum CaptureLoad:') + '\n' + extract(settings, 'enum CameraErrorDetail {') + '\n' + harness, encoding='utf-8')
 
