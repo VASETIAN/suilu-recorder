@@ -34,6 +34,18 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section("界面形态") {
+                    Picker("打开方式", selection: $draft.interfaceMode) {
+                        ForEach(RecorderInterface.allCases) { Text($0.title).tag($0) }
+                    }
+                    Text("浏览模式可输入网址或搜索，打开小黑盒官方网页；录像由你手动开始，界面保留录制状态、计时和停止按钮。浏览发生在本 App 内，切换到其他 App 后仍按原规则停止或分段恢复。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.disabled(!recorder.canConfigure)
+                Section("隐私") {
+                    Toggle("任务切换器中隐藏内容", isOn: $draft.obscureAppSwitcher)
+                    Text("默认开启。离开活动前台时用模糊遮罩覆盖页面，回到 App 后恢复；软件内正常截图仍可用。不会隐藏系统相机和麦克风隐私指示。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.disabled(!recorder.canConfigure)
                 Section("录像") {
                     if qualities.isEmpty {
                         Text("相机准备完成后可选择画质。")
@@ -56,7 +68,7 @@ struct SettingsView: View {
                 .disabled(!recorder.canConfigure)
 
                 Section("黑屏模式") {
-                    Text("录像中或拍照界面双击取景器进入黑屏。黑屏拍照：单击拍一张，长按 0.8 秒恢复；Live 开关和镜头保持进入前的设置。")
+                    Text("相机模式中双击取景器进入黑屏。黑屏拍照：单击拍一张，长按 0.8 秒恢复；Live 开关和镜头保持进入前的设置。浏览模式保留录制状态，不自动进入黑屏。")
                         .font(.caption).foregroundStyle(.secondary)
                     Picker("录像恢复方式", selection: $draft.recovery) {
                         ForEach(BlackScreenRecovery.allCases) { Text($0.title).tag($0) }
@@ -137,12 +149,12 @@ struct SettingsView: View {
                 Section("快捷启动") {
                     Text("Swift Playgrounds 运行：可将控制中心的“打开 App”设为 Swift Playgrounds，再进入此工程运行。系统不把运行预览注册成独立 App。")
                         .font(.subheadline)
-                    Text("独立安装版（iOS 18 及以上）：先打开一次 App，再进入控制中心，长按空白处 → 添加控制 → 搜索“随心记” → 选择“随心记相机”。位置由你选择；也可将“开启随心记相机”快捷指令用于操作按钮。")
+                    Text("独立安装版（iOS 18 及以上）：先打开一次 App，再进入控制中心，长按空白处 → 添加控制 → 搜索“畅游” → 选择“畅游相机”。位置由你选择；也可将“开启畅游相机”快捷指令用于操作按钮。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
 
-                Section("关于随心记") {
-                    LabeledContent("版本", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.3.0")
+                Section("关于畅游") {
+                    LabeledContent("版本", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.4.0")
                     Text("使用 Apple 原生拍摄、画质优先处理、自动白平衡和支持时的镜头畸变校正。原照片直接保存，App 不加美颜或 AI 滤镜。系统是否使用多帧融合等处理由设备和场景决定，成片不保证与系统相机所有模式一致。")
                         .font(.caption).foregroundStyle(.secondary)
                     Text("开始前选择长焦倍率会使用真实长焦镜头；受格式能力限制，可能自动降低帧率。4K120 通常需要主摄。其他倍率可能是传感器裁切或数字变焦。照片 JPEG、视频 MOV，Live Photo 保留配对文件。")
@@ -164,6 +176,7 @@ struct SettingsView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("完成") {
+                        if draft.interfaceMode == .browser { draft.captureMode = .video }
                         if draft != recorder.settings { recorder.apply(draft) }
                         dismiss()
                     }.disabled(!recorder.canConfigure)

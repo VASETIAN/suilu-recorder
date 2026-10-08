@@ -46,18 +46,41 @@ assert(migrated.recovery == .longPress && migrated.livePhotoEnabled)
 assert(migrated.rearLens == .automatic)
 assert(!migrated.resumeAfterBackground && !migrated.automaticallyExportToPhotos)
 assert(migrated.thermalProtection && migrated.hapticFeedback)
+assert(migrated.interfaceMode == .camera && migrated.obscureAppSwitcher)
 var new = migrated
 new.fps = 120; new.dynamicRange = .hdr; new.rearLens = .telephoto
 new.resumeAfterBackground = true; new.automaticallyExportToPhotos = true
-new.thermalProtection = false; new.hapticFeedback = false; new.save()
+new.thermalProtection = false; new.hapticFeedback = false
+new.interfaceMode = .browser; new.obscureAppSwitcher = false; new.captureMode = .video; new.save()
 assert(RecorderSettings.load() == new)
 var preferenceOnly = new
 preferenceOnly.resumeAfterBackground.toggle(); preferenceOnly.hapticFeedback.toggle()
+preferenceOnly.interfaceMode = .camera; preferenceOnly.obscureAppSwitcher.toggle()
 assert(preferenceOnly.hasSameCaptureConfiguration(as: new))
 preferenceOnly.fps = 30
 assert(!preferenceOnly.hasSameCaptureConfiguration(as: new))
 new.fps = 999; new.save()
 assert(RecorderSettings.load().fps == 30)
+new.captureMode = .photo; new.save()
+assert(RecorderSettings.load().captureMode == .video) // Browser form always uses movie output.
+
+assert(BrowserAddress.destination("  https://www.xiaoheihe.cn/app/bbs/home  ") == BrowserAddress.community)
+assert(BrowserAddress.destination("example.com/test?q=1")?.absoluteString == "https://example.com/test?q=1")
+let search = URLComponents(url: BrowserAddress.destination("苹果 & 相机 #测试")!, resolvingAgainstBaseURL: false)!
+assert(search.host == "www.bing.com" && search.queryItems?.first?.value == "苹果 & 相机 #测试")
+for invalid in ["", "  ", "javascript:alert(1)", "DATA:text/html,test", "file:///tmp/test",
+                "xiaoheihe://feed", "https://user:password@example.com/", "user:password@example.com"] {
+    assert(BrowserAddress.destination(invalid) == nil, "Unsafe/empty input: \(invalid)")
+}
+assert(BrowserAddress.allows(URL(string: "https://example.com/path")!))
+assert(!BrowserAddress.allows(URL(string: "about:blank")!))
+assert(!BrowserAddress.allows(URL(string: "file:///tmp/test")!))
+for enabled in [false, true] {
+    for active in [false, true] {
+        assert(ScreenPrivacyState.shouldCover(enabled: enabled, active: active) == (enabled && !active))
+    }
+}
+print("PASS: mobile community URL, web/search input escaping and blocked schemes/credentials, UI preferences and foreground/switcher privacy states")
 
 let item = MediaItem(id: UUID(), kind: .video, createdAt: Date(), camera: "后置",
     resolution: "3840 × 2160", fps: 120, dynamicRange: "HDR", hasAudio: true, location: nil)

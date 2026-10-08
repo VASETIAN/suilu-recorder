@@ -134,7 +134,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                 isConfiguring = false
                 isReady = false
                 status = "请在系统设置中允许相机权限"
-                showMessage("需要相机权限", "打开系统设置，允许随心记访问相机，然后回到这里重试。")
+                showMessage("需要相机权限", "打开系统设置，允许畅游访问相机，然后回到这里重试。")
                 return
             }
             var requested = settings
@@ -263,6 +263,20 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             }
             configure(requested, displayedZoom: displayedZoom)
         }
+    }
+
+    func setInterfaceMode(_ mode: RecorderInterface) {
+        guard !isConfiguring, phase == .idle || phase == .recording else { return }
+        if mode == .browser && settings.captureMode != .video {
+            var value = settings
+            value.interfaceMode = mode
+            value.captureMode = .video
+            apply(value)
+            return
+        }
+        settings.interfaceMode = mode
+        settings.save()
+        captureQueue.async { self.captureSettings.interfaceMode = mode }
     }
 
     func switchCamera() {
@@ -1306,10 +1320,10 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
 
     private func handleRuntimeErrorOnQueue(_ error: NSError?, reportedInForeground: Bool) {
         if reportedInForeground { resumeAfterBackgroundPending = false }
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.5.0"
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.4.0"
         let mode = captureSettings.captureMode == .video ? captureSettings.mode.title : captureSettings.captureMode.title
         let lens = videoInput.map { Self.lensLabel($0.device) } ?? "相机"
-        let detail = "随心记 \(version) · \(mode) · \(lens)\n" + CameraErrorDetail.describe(error)
+        let detail = "畅游 \(version) · \(mode) · \(lens)\n" + CameraErrorDetail.describe(error)
         publish {
             self.lastCameraError = detail
             UserDefaults.standard.set(detail, forKey: "Recorder.lastCameraError")

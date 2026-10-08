@@ -28,7 +28,7 @@ def build(controller: Path, output: Path):
     phase = extract(settings, 'enum RecordingPhase:')
     pip = extract(settings, 'enum CameraPiPState:')
     methods = [extract(source, s) for s in (
-        'func sceneChanged(', 'private func finishCaptureStateOnQueue()',
+        'func sceneChanged(', 'func setInterfaceMode(', 'private func finishCaptureStateOnQueue()',
         'private func setPhase(', 'private func stopOnQueue(',
         'private func handleRuntimeErrorOnQueue(', 'private func completeCaptureOnQueue(',
         'private func requestResumeOnQueue(', 'private func updateCaptureLoadOnQueue(')]
@@ -65,6 +65,8 @@ struct FakeSettings {
     var captureMode = "video", mode = "4K · 60 fps · HDR"
     var reserveBytes: Int64 = 512
     var resumeAfterBackground = false, automaticallyExportToPhotos = false, thermalProtection = true, includeLocation = true
+    var interfaceMode: RecorderInterface = .camera
+    func save() {}
 }
 struct MediaItem { var id = UUID(); var kind = "video" }
 enum MediaLibrary {
@@ -111,7 +113,8 @@ final class Recorder: @unchecked Sendable {
     var videoInput: FakeInput?
     var lastCameraError: String?
     var reports: [String] = []
-    var settings: FakeSettings { captureSettings }
+    var settings: FakeSettings { get { captureSettings } set { captureSettings = newValue } }
+    func apply(_ value: FakeSettings) { captureSettings = value; startConfigurations += 1 }
     var message: String?
     var resumedStarts: [UUID] = []
     var canRecord: Bool { mainForeground && isReady && phase == .idle }
@@ -419,10 +422,22 @@ for blocker in ["settings", "library", "error", "disabled"] {
     assert(blockedView.recorder.resumedStarts.isEmpty)
 }
 print("PASS: production UI reconciliation waits for active/ready, consumes once, carries black-screen intent and respects sheets/errors/default off")
+let browsing = Recorder()
+browsing.phase = .recording; browsing.capturePhase = .recording
+browsing.setInterfaceMode(.browser); browsing.pump()
+assert(browsing.settings.interfaceMode == .browser && browsing.capturePhase == .recording)
+browsing.setInterfaceMode(.camera); browsing.pump()
+assert(browsing.settings.interfaceMode == .camera && browsing.session.starts == 0 && browsing.startConfigurations == 0)
+browsing.phase = .finishing; browsing.setInterfaceMode(.browser); browsing.pump()
+assert(browsing.settings.interfaceMode == .camera)
+let photoBrowser = Recorder()
+photoBrowser.captureSettings.captureMode = "photo"; photoBrowser.setInterfaceMode(.browser)
+assert(photoBrowser.settings.captureMode == "video" && photoBrowser.settings.interfaceMode == .browser)
+print("PASS: production interface switching preserves ongoing video/session, blocks finishing, and changes photo output before browsing")
 print("Replay uses fake session and queues; AVKit, Apple SDK and physical device behavior are not tested.")
 '''.replace('METHODS', '\n'.join(methods)).replace('VIEW_METHOD', extract(view, 'private func restoreOrResumeCapture()')).replace('SNAPSHOT_METHOD', extract(view, 'private func rememberBlackBeforeLeaving()'))
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(phase + '\n' + pip + '\n' + extract(settings, 'enum CaptureLoad:') + '\n' + extract(settings, 'enum CameraErrorDetail {') + '\n' + harness, encoding='utf-8')
+    output.write_text(phase + '\n' + pip + '\n' + extract(settings, 'enum RecorderInterface:') + '\n' + extract(settings, 'enum CaptureLoad:') + '\n' + extract(settings, 'enum CameraErrorDetail {') + '\n' + harness, encoding='utf-8')
 
 
 if __name__ == '__main__':

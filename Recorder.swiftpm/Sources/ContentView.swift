@@ -15,6 +15,7 @@ struct ContentView: View {
     @StateObject private var location = LocationService()
     @StateObject private var brightness = ScreenBrightness()
     @StateObject private var pictureInPicture = RecorderPictureInPicture()
+    @StateObject private var browser = RecorderBrowser()
 
     var body: some View {
         GeometryReader { geometry in
@@ -23,7 +24,8 @@ struct ContentView: View {
                 Color.black.ignoresSafeArea()
                 CameraPreview(recorder: recorder, pictureInPicture: pictureInPicture,
                               onBlackScreen: { setBlackScreen(true) })
-                    .ignoresSafeArea().accessibilityHidden(isBlack)
+                    .ignoresSafeArea().accessibilityHidden(isBlack || recorder.settings.interfaceMode == .browser)
+                if recorder.settings.interfaceMode == .camera {
                 LinearGradient(colors: [.black.opacity(0.75), .clear, .clear, .black.opacity(0.85)],
                                startPoint: .top, endPoint: .bottom)
                     .ignoresSafeArea().allowsHitTesting(false)
@@ -42,11 +44,17 @@ struct ContentView: View {
                 .padding(.vertical, landscape ? 10 : 18)
                 .frame(maxWidth: 1000)
                 .accessibilityHidden(isBlack)
+                } else {
+                    BrowserView(recorder: recorder, browser: browser, capture: capture,
+                                settings: { pendingResumeID = nil; showSettings = true },
+                                library: { pendingResumeID = nil; showLibrary = true })
+                }
 
                 if isBlack { blackScreen }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .background(ScreenPrivacyAnchor(enabled: recorder.settings.obscureAppSwitcher))
         .statusBarHidden(isBlack)
         .persistentSystemOverlays(isBlack ? .hidden : .automatic)
         .sheet(isPresented: $showSettings) {
@@ -63,6 +71,7 @@ struct ContentView: View {
             recorder.sceneChanged(scenePhase)
             location.setEnabled(recorder.settings.includeLocation, foreground: scenePhase == .active)
             updateIdleTimer()
+            handleCameraLaunchRequest()
         }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false; setBlackScreen(false) }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
@@ -71,9 +80,7 @@ struct ContentView: View {
             UIApplication.shared.isIdleTimerDisabled = false
         }
         .onReceive(NotificationCenter.default.publisher(for: RecorderLaunchRequest.notification)) { _ in
-            showSettings = false
-            showLibrary = false
-            setBlackScreen(false)
+            handleCameraLaunchRequest()
         }
         .onChange(of: scenePhase) { value in
             if value == .background { pendingResumeID = nil }
@@ -85,6 +92,7 @@ struct ContentView: View {
             restoreOrResumeCapture()
         }
         .onChange(of: recorder.phase) { value in
+            handleCameraLaunchRequest()
             if value == .recording && (recorder.settings.autoBlackScreen || restoreBlackAfterResume) && scenePhase == .active {
                 setBlackScreen(true)
                 restoreBlackAfterResume = false
@@ -106,11 +114,13 @@ struct ContentView: View {
             location.setEnabled(value, foreground: scenePhase == .active)
         }
         .onChange(of: recorder.settings.dimBlackScreen) { _ in setBlackScreen(isBlack) }
+        .onChange(of: recorder.settings.interfaceMode) { _ in setBlackScreen(false) }
         .onChange(of: recorder.settings.captureMode) { _ in setBlackScreen(false); pendingResumeID = nil }
         .onChange(of: recorder.isReady) { ready in
             if !ready { setBlackScreen(false) }
             restoreOrResumeCapture()
         }
+        .onChange(of: recorder.isConfiguring) { _ in handleCameraLaunchRequest() }
         .onChange(of: recorder.resumeRequest) { value in pendingResumeID = value; restoreOrResumeCapture() }
     }
 
@@ -122,7 +132,7 @@ struct ContentView: View {
                         Circle().fill(.red).frame(width: 8, height: 8)
                         Text(recorder.elapsedLabel).monospacedDigit().font(.headline)
                     } else {
-                        Text("随心记").font(.headline)
+                        Text("畅游").font(.headline)
                     }
                 }
                 Text(recorder.settings.captureMode == .video ? recorder.settings.mode.title : recorder.settings.captureMode.title)
@@ -136,6 +146,13 @@ struct ContentView: View {
                 }
             }
             Spacer(minLength: 8)
+            Button { recorder.setInterfaceMode(.browser) } label: {
+                Image(systemName: "safari").font(.title3)
+                    .frame(width: 44, height: 44).background(.black.opacity(0.35), in: Circle())
+            }
+            .disabled(recorder.isConfiguring || (recorder.phase != .idle && recorder.phase != .recording)
+                      || pictureInPicture.isActive || pictureInPicture.isStarting)
+            .accessibilityLabel("打开浏览模式")
             if recorder.settings.captureMode == .video { pictureInPictureButton }
             else { livePhotoButton }
             Button(action: recorder.toggleTorch) {
@@ -296,6 +313,16 @@ struct ContentView: View {
         }
     }
 
+    private func handleCameraLaunchRequest() {
+        guard RecorderLaunchRequest.isPending else { return }
+        showSettings = false
+        showLibrary = false
+        setBlackScreen(false)
+        guard !recorder.isConfiguring, recorder.phase == .idle || recorder.phase == .recording else { return }
+        _ = RecorderLaunchRequest.consume()
+        recorder.setInterfaceMode(.camera)
+    }
+
     private func rememberBlackBeforeLeaving() {
         guard !leavingSnapshotTaken else { return }
         blackBeforeLeaving = isBlack
@@ -357,7 +384,7 @@ struct ContentView: View {
     private func setBlackScreen(_ requested: Bool) {
         let allowed = recorder.settings.captureMode == .video ? recorder.phase == .recording
             : recorder.isReady && !recorder.isConfiguring
-        let enabled = requested && scenePhase == .active && allowed
+        let enabled = requested && scenePhase == .active && allowed && recorder.settings.interfaceMode == .camera
         // Set physical brightness in the action itself, before showing the black
         // surface. Every entry/exit path uses this function, including auto entry.
         if enabled && recorder.settings.dimBlackScreen { brightness.dim() }

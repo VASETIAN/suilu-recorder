@@ -14,7 +14,7 @@ struct RecorderCameraControl: ControlWidget {
                 Label("开启相机", systemImage: "camera.fill")
             }
         }
-        .displayName("随心记相机")
-        .description("打开随心记的拍摄界面。")
+        .displayName("畅游相机")
+        .description("打开畅游的拍摄界面。")
     }
 }

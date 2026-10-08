@@ -30,7 +30,7 @@ def generate():
     def field(name):
         return re.search(r'\b' + name + r':\s*"([^"]+)"', manifest).group(1)
     info = {
-        'CFBundleDevelopmentRegion': 'zh_CN', 'CFBundleDisplayName': '随心记',
+        'CFBundleDevelopmentRegion': 'zh_CN', 'CFBundleDisplayName': '畅游',
         'CFBundleExecutable': '$(EXECUTABLE_NAME)',
         'CFBundleIdentifier': '$(PRODUCT_BUNDLE_IDENTIFIER)',
         'CFBundleInfoDictionaryVersion': '6.0', 'CFBundleName': '$(PRODUCT_NAME)',
@@ -55,7 +55,7 @@ def generate():
     config.mkdir(exist_ok=True)
     (config / 'Info.plist').write_bytes(plistlib.dumps(info))
     control_info = {
-        'CFBundleDevelopmentRegion': 'zh_CN', 'CFBundleDisplayName': '随心记相机',
+        'CFBundleDevelopmentRegion': 'zh_CN', 'CFBundleDisplayName': '畅游相机',
         'CFBundleExecutable': '$(EXECUTABLE_NAME)', 'CFBundleIdentifier': '$(PRODUCT_BUNDLE_IDENTIFIER)',
         'CFBundleInfoDictionaryVersion': '6.0', 'CFBundleName': '$(PRODUCT_NAME)',
         'CFBundlePackageType': 'XPC!', 'CFBundleShortVersionString': field('displayVersion'),
@@ -70,7 +70,7 @@ def generate():
         objects[key] = {'isa': isa, **values}
         return key
     sources = sorted((PACKAGE / 'Sources').glob('*.swift'))
-    assert len(sources) == 13 and sum('@main' in p.read_text(encoding='utf-8') for p in sources) == 1
+    assert len(sources) == 14 and sum('@main' in p.read_text(encoding='utf-8') for p in sources) == 1
     refs, files = [], []
     for path in sources:
         ref = add('source:' + path.name, 'PBXFileReference', lastKnownFileType='sourcecode.swift',

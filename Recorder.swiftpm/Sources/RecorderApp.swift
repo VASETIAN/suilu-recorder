@@ -43,6 +43,6 @@ private struct RecorderLaunchView: View {
     }
 
     private func handleLaunchRequest() {
-        if RecorderLaunchRequest.consume(), recorder == nil { recorder = RecorderController() }
+        if RecorderLaunchRequest.isPending, recorder == nil { recorder = RecorderController() }
     }
 }

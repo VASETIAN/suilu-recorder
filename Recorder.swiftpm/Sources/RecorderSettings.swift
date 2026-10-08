@@ -71,6 +71,41 @@ enum CaptureMode: String, Codable, CaseIterable, Identifiable, Sendable {
 
 enum RearCameraLens: String, Codable, Sendable { case automatic, telephoto }
 
+enum RecorderInterface: String, Codable, CaseIterable, Identifiable, Sendable {
+    case camera, browser
+    var id: String { rawValue }
+    var title: String { self == .camera ? "相机模式" : "浏览模式" }
+}
+
+enum BrowserAddress {
+    static let community = URL(string: "https://www.xiaoheihe.cn/app/bbs/home")!
+    static func allows(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), ["https", "http"].contains(scheme),
+              let host = url.host, !host.isEmpty, url.user == nil, url.password == nil else { return false }
+        return true
+    }
+    static func destination(_ input: String) -> URL? {
+        let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        if text.contains("://") || text.lowercased().hasPrefix("javascript:")
+            || text.lowercased().hasPrefix("data:") || text.lowercased().hasPrefix("file:") {
+            guard let url = URL(string: text), allows(url) else { return nil }
+            return url
+        }
+        if text.contains("."), !text.contains(where: \.isWhitespace) {
+            guard let url = URL(string: "https://" + text), allows(url) else { return nil }
+            return url
+        }
+        var query = URLComponents(string: "https://www.bing.com/search")!
+        query.queryItems = [URLQueryItem(name: "q", value: text)]
+        return query.url
+    }
+}
+
+enum ScreenPrivacyState {
+    static func shouldCover(enabled: Bool, active: Bool) -> Bool { enabled && !active }
+}
+
 enum CameraZoom {
     static func telephotoBase(switchOvers: [Double], multiplier: Double) -> Double? {
         guard let last = switchOvers.last, multiplier > 0 else { return nil }
@@ -102,6 +137,8 @@ struct RecorderSettings: Codable, Equatable, Sendable {
     var automaticallyExportToPhotos = false
     var hapticFeedback = true
     var thermalProtection = true
+    var interfaceMode: RecorderInterface = .camera
+    var obscureAppSwitcher = true
     var mode: VideoMode { VideoMode(quality: quality, fps: fps, dynamicRange: dynamicRange) }
     var reserveBytes: Int64 { Int64(reserveMB) * 1_048_576 }
 
@@ -129,13 +166,17 @@ struct RecorderSettings: Codable, Equatable, Sendable {
                 value.automaticallyExportToPhotos = old["automaticallyExportToPhotos"] as? Bool ?? false
                 value.hapticFeedback = old["hapticFeedback"] as? Bool ?? true
                 value.thermalProtection = old["thermalProtection"] as? Bool ?? true
+                value.interfaceMode = RecorderInterface(rawValue: old["interfaceMode"] as? String ?? "") ?? .camera
+                value.obscureAppSwitcher = old["obscureAppSwitcher"] as? Bool ?? true
             }
             if ![24, 30, 60, 120].contains(value.fps) { value.fps = 30 }
             if ![512, 1024, 2048].contains(value.reserveMB) { value.reserveMB = 512 }
+            if value.interfaceMode == .browser { value.captureMode = .video }
             return value
         }
         if ![24, 30, 60, 120].contains(value.fps) { value.fps = 30 }
         if ![512, 1024, 2048].contains(value.reserveMB) { value.reserveMB = 512 }
+        if value.interfaceMode == .browser { value.captureMode = .video }
         return value
     }
 
