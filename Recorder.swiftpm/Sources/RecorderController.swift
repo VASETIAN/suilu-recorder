@@ -528,7 +528,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
 
     private static func lensLabel(_ device: AVCaptureDevice) -> String {
         if device.position == .front { return "前置相机" }
-        let actual = device.activePrimaryConstituentDevice ?? device
+        let actual = device.activePrimaryConstituent ?? device
         switch actual.deviceType {
         case .builtInTelephotoCamera: return "后置长焦"
         case .builtInUltraWideCamera: return "后置超广角"
