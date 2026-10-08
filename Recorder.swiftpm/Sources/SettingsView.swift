@@ -9,8 +9,11 @@ struct SettingsView: View {
     @ObservedObject var location: LocationService
     @ObservedObject var pictureInPicture: RecorderPictureInPicture
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @State private var draft: RecorderSettings
     @State private var showLibrary = false
+    @State private var pendingBrowserStart = false
+    @State private var browserStartSubmitted = false
 
     init(recorder: RecorderController, location: LocationService, pictureInPicture: RecorderPictureInPicture) {
         self.recorder = recorder
@@ -34,13 +37,40 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section("边浏览边录像") {
+                    if recorder.phase == .recording {
+                        LabeledContent("正在录像", value: recorder.elapsedLabel).monospacedDigit()
+                        Button("停止录像并保存", role: .destructive) { recorder.stopRecording() }
+                        Button("返回浏览，继续录像") {
+                            recorder.setInterfaceMode(.browser)
+                            dismiss()
+                        }
+                    } else if pendingBrowserStart {
+                        HStack { ProgressView(); Text("正在准备录像…") }
+                    } else {
+                        Text(recorder.phase == .idle ? recorder.status : recorder.phase.title)
+                            .font(.subheadline).foregroundStyle(.secondary)
+                        Button("开始录像并返回浏览", action: startBrowsingRecording)
+                            .disabled(!recorder.canRecord)
+                    }
+                    Text("浏览主页只显示帖子、搜索和网页导航。开始、计时和停止都在这里；停止时保存到内置图库。录像需你手动开启，系统相机和麦克风隐私指示正常显示。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Section("界面形态") {
                     Picker("打开方式", selection: $draft.interfaceMode) {
                         ForEach(RecorderInterface.allCases) { Text($0.title).tag($0) }
                     }
-                    Text("浏览模式可输入网址或搜索，打开小黑盒官方网页；录像由你手动开始，界面保留录制状态、计时和停止按钮。浏览发生在本 App 内，切换到其他 App 后仍按原规则停止或分段恢复。")
+                    Text("浏览模式打开按手机宽度显示的小黑盒官方社区网页，可输入网址或全网搜索。浏览发生在本 App 内，切换到其他 App 后仍按原规则停止或分段恢复。")
                         .font(.caption).foregroundStyle(.secondary)
                 }.disabled(!recorder.canConfigure)
+                if recorder.settings.interfaceMode == .browser {
+                    Section {
+                        Button("打开相机界面") {
+                            recorder.setInterfaceMode(.camera)
+                            dismiss()
+                        }.disabled(recorder.isConfiguring || (recorder.phase != .idle && recorder.phase != .recording))
+                    }
+                }
                 Section("隐私") {
                     Toggle("任务切换器中隐藏内容", isOn: $draft.obscureAppSwitcher)
                     Text("默认开启。离开活动前台时用模糊遮罩覆盖页面，回到 App 后恢复；软件内正常截图仍可用。不会隐藏系统相机和麦克风隐私指示。")
@@ -68,7 +98,7 @@ struct SettingsView: View {
                 .disabled(!recorder.canConfigure)
 
                 Section("黑屏模式") {
-                    Text("相机模式中双击取景器进入黑屏。黑屏拍照：单击拍一张，长按 0.8 秒恢复；Live 开关和镜头保持进入前的设置。浏览模式保留录制状态，不自动进入黑屏。")
+                    Text("相机模式中双击取景器进入黑屏。黑屏拍照：单击拍一张，长按 0.8 秒恢复；Live 开关和镜头保持进入前的设置。浏览模式不自动进入黑屏，录制状态在设置中查看。")
                         .font(.caption).foregroundStyle(.secondary)
                     Picker("录像恢复方式", selection: $draft.recovery) {
                         ForEach(BlackScreenRecovery.allCases) { Text($0.title).tag($0) }
@@ -154,7 +184,7 @@ struct SettingsView: View {
                 }
 
                 Section("关于畅游") {
-                    LabeledContent("版本", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.4.0")
+                    LabeledContent("版本", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.4.1")
                     Text("使用 Apple 原生拍摄、画质优先处理、自动白平衡和支持时的镜头畸变校正。原照片直接保存，App 不加美颜或 AI 滤镜。系统是否使用多帧融合等处理由设备和场景决定，成片不保证与系统相机所有模式一致。")
                         .font(.caption).foregroundStyle(.secondary)
                     Text("开始前选择长焦倍率会使用真实长焦镜头；受格式能力限制，可能自动降低帧率。4K120 通常需要主摄。其他倍率可能是传感器裁切或数字变焦。照片 JPEG、视频 MOV，Live Photo 保留配对文件。")
@@ -169,17 +199,17 @@ struct SettingsView: View {
                     }
                 }
             }
-            .navigationTitle("拍摄设置")
+            .navigationTitle("设置")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }.disabled(recorder.phase.blocksConfiguration)
+                    Button("返回") { pendingBrowserStart = false; dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("完成") {
                         if draft.interfaceMode == .browser { draft.captureMode = .video }
                         if draft != recorder.settings { recorder.apply(draft) }
                         dismiss()
-                    }.disabled(!recorder.canConfigure)
+                    }.disabled(!recorder.canConfigure || pendingBrowserStart)
                 }
             }
             .onChange(of: draft.quality) { _ in
@@ -188,14 +218,45 @@ struct SettingsView: View {
             }
             .onChange(of: draft.fps) { _ in clampDynamicRange() }
             .onAppear { recorder.refreshLibrary() }
+            .onChange(of: recorder.isConfiguring) { _ in continueBrowsingStart() }
+            .onChange(of: recorder.isReady) { _ in continueBrowsingStart() }
+            .onChange(of: recorder.phase) { _ in continueBrowsingStart() }
+            .onChange(of: recorder.message?.id) { _ in continueBrowsingStart() }
+            .onChange(of: scenePhase) { _ in continueBrowsingStart() }
+            .onDisappear { pendingBrowserStart = false }
             .sheet(isPresented: $showLibrary) { LibraryView(recorder: recorder) }
-            .interactiveDismissDisabled(recorder.phase.blocksConfiguration)
+            .interactiveDismissDisabled(pendingBrowserStart)
         }
         .preferredColorScheme(.dark)
         .alert(item: Binding(get: { showLibrary ? nil : recorder.message },
                              set: { recorder.message = $0 })) { value in
             Alert(title: Text(value.title), message: Text(value.detail), dismissButton: .default(Text("知道了")))
         }
+    }
+
+    private func startBrowsingRecording() {
+        guard recorder.canRecord else { return }
+        draft.interfaceMode = .browser
+        draft.captureMode = .video
+        recorder.message = nil
+        pendingBrowserStart = true
+        browserStartSubmitted = false
+        if draft != recorder.settings { recorder.apply(draft) }
+        continueBrowsingStart()
+    }
+
+    private func continueBrowsingStart() {
+        guard pendingBrowserStart else { return }
+        guard scenePhase != .background, recorder.message == nil else { pendingBrowserStart = false; return }
+        if recorder.phase == .recording { pendingBrowserStart = false; dismiss(); return }
+        if browserStartSubmitted {
+            if recorder.phase != .preparing { pendingBrowserStart = false }
+            return
+        }
+        guard scenePhase == .active, recorder.canRecord, recorder.settings.interfaceMode == .browser,
+              recorder.settings.captureMode == .video else { return }
+        browserStartSubmitted = true
+        recorder.startRecording(location: recorder.settings.includeLocation ? location.snapshot() : nil)
     }
 
     private func clampDynamicRange() {

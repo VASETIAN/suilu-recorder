@@ -25,6 +25,7 @@ def build(controller: Path, output: Path):
     source = controller.read_text(encoding='utf-8')
     settings = (ROOT / 'Recorder.swiftpm/Sources/RecorderSettings.swift').read_text(encoding='utf-8')
     view = (ROOT / 'Recorder.swiftpm/Sources/ContentView.swift').read_text(encoding='utf-8')
+    settings_view = (ROOT / 'Recorder.swiftpm/Sources/SettingsView.swift').read_text(encoding='utf-8')
     phase = extract(settings, 'enum RecordingPhase:')
     pip = extract(settings, 'enum CameraPiPState:')
     methods = [extract(source, s) for s in (
@@ -65,7 +66,7 @@ final class ReplaySession {
     func startRunning() { starts += 1; isRunning = !isInterrupted }
     func stopRunning() { isRunning = false }
 }
-struct FakeSettings {
+struct FakeSettings: Equatable {
     var captureMode = "video", mode = "4K · 60 fps · HDR"
     var reserveBytes: Int64 = 512
     var resumeAfterBackground = false, automaticallyExportToPhotos = false, thermalProtection = true, includeLocation = true
@@ -118,10 +119,19 @@ final class Recorder: @unchecked Sendable {
     var lastCameraError: String?
     var reports: [String] = []
     var settings: FakeSettings { get { captureSettings } set { captureSettings = newValue } }
-    func apply(_ value: FakeSettings) { captureSettings = value; startConfigurations += 1 }
+    var delayedApply = false
+    func apply(_ value: FakeSettings) {
+        startConfigurations += 1
+        if delayedApply {
+            isConfiguring = true
+            captureQueue.async { self.publish { self.captureSettings = value; self.isConfiguring = false } }
+        } else { captureSettings = value }
+    }
     var message: String?
     var resumedStarts: [UUID] = []
-    var canRecord: Bool { mainForeground && isReady && phase == .idle }
+    var canRecord: Bool { mainForeground && isReady && !isConfiguring && phase == .idle }
+    var browserStarts: [String?] = []
+    func startRecording(location: String?) { browserStarts.append(location); phase = .preparing }
     func startRecording(location: String?, resumedFrom: UUID) { resumedStarts.append(resumedFrom); phase = .preparing }
     static func lensLabel(_ value: String) -> String { value }
     func publish(_ action: @escaping @Sendable () -> Void) { uiQueue.async(action) }
@@ -450,8 +460,50 @@ assert(RecorderLaunchRequest.isPending)
 launchView.recorder.phase = .idle; launchView.launch(); launchView.recorder.pump()
 assert(!RecorderLaunchRequest.isPending && launchView.recorder.settings.interfaceMode == .camera)
 print("PASS: control launch waits through configuration/save before consuming the request and returning to camera")
+final class ReplaySettingsView {
+    let recorder = Recorder(), location = ReplayLocation()
+    var draft = FakeSettings(), scenePhase = ScenePhase.active
+    var pendingBrowserStart = false, browserStartSubmitted = false, dismissals = 0
+    func dismiss() { dismissals += 1 }
+    func begin() { startBrowsingRecording() }
+    func reconcile() { continueBrowsingStart() }
+    BROWSER_BEGIN
+    BROWSER_CONTINUE
+}
+let settingsStart = ReplaySettingsView()
+settingsStart.recorder.delayedApply = true
+settingsStart.draft.captureMode = "photo"
+settingsStart.begin()
+assert(settingsStart.pendingBrowserStart && settingsStart.recorder.isConfiguring && settingsStart.recorder.browserStarts.isEmpty)
+settingsStart.reconcile(); settingsStart.recorder.pump()
+settingsStart.scenePhase = .inactive; settingsStart.reconcile()
+assert(settingsStart.recorder.browserStarts.isEmpty && settingsStart.pendingBrowserStart)
+settingsStart.scenePhase = .active; settingsStart.reconcile(); settingsStart.reconcile()
+assert(settingsStart.recorder.browserStarts.count == 1 && settingsStart.recorder.browserStarts[0] == "current location")
+assert(settingsStart.recorder.settings.interfaceMode == .browser && settingsStart.recorder.settings.captureMode == "video")
+assert(settingsStart.dismissals == 0 && settingsStart.pendingBrowserStart)
+settingsStart.recorder.phase = .recording; settingsStart.reconcile(); settingsStart.reconcile()
+assert(settingsStart.dismissals == 1 && !settingsStart.pendingBrowserStart)
+let failedStart = ReplaySettingsView()
+failedStart.draft.interfaceMode = .browser; failedStart.recorder.settings.interfaceMode = .browser
+failedStart.begin(); failedStart.recorder.phase = .idle; failedStart.reconcile(); failedStart.reconcile()
+assert(failedStart.recorder.browserStarts.count == 1 && !failedStart.pendingBrowserStart && failedStart.dismissals == 0)
+for blocker in ["background", "error", "closed"] {
+    let pending = ReplaySettingsView()
+    pending.recorder.delayedApply = true; pending.begin()
+    if blocker == "background" { pending.scenePhase = .background }
+    if blocker == "error" { pending.recorder.message = "permission denied" }
+    if blocker == "closed" { pending.pendingBrowserStart = false }
+    pending.reconcile(); pending.recorder.pump(); pending.scenePhase = .active
+    pending.recorder.message = nil; pending.reconcile()
+    assert(pending.recorder.browserStarts.isEmpty && !pending.pendingBrowserStart && pending.dismissals == 0)
+}
+let blockedStart = ReplaySettingsView()
+blockedStart.recorder.isReady = false; blockedStart.begin()
+assert(!blockedStart.pendingBrowserStart && blockedStart.recorder.browserStarts.isEmpty)
+print("PASS: settings start waits for applied video/active camera, starts once, dismisses only after recording, cancels error/background/close and never retries a failed start")
 print("Replay uses fake session and queues; AVKit, Apple SDK and physical device behavior are not tested.")
-'''.replace('METHODS', '\n'.join(methods)).replace('VIEW_METHOD', extract(view, 'private func restoreOrResumeCapture()')).replace('SNAPSHOT_METHOD', extract(view, 'private func rememberBlackBeforeLeaving()')).replace('LAUNCH_METHOD', extract(view, 'private func handleCameraLaunchRequest()'))
+'''.replace('METHODS', '\n'.join(methods)).replace('VIEW_METHOD', extract(view, 'private func restoreOrResumeCapture()')).replace('SNAPSHOT_METHOD', extract(view, 'private func rememberBlackBeforeLeaving()')).replace('LAUNCH_METHOD', extract(view, 'private func handleCameraLaunchRequest()')).replace('BROWSER_BEGIN', extract(settings_view, 'private func startBrowsingRecording()')).replace('BROWSER_CONTINUE', extract(settings_view, 'private func continueBrowsingStart()'))
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(phase + '\n' + pip + '\n' + extract(settings, 'enum RecorderInterface:') + '\n' + extract(settings, 'enum CaptureLoad:') + '\n' + extract(settings, 'enum CameraErrorDetail {') + '\n' + harness, encoding='utf-8')
 

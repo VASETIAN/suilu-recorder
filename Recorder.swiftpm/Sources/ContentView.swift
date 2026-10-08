@@ -45,9 +45,7 @@ struct ContentView: View {
                 .frame(maxWidth: 1000)
                 .accessibilityHidden(isBlack)
                 } else {
-                    BrowserView(recorder: recorder, browser: browser, capture: capture,
-                                settings: { pendingResumeID = nil; showSettings = true },
-                                library: { pendingResumeID = nil; showLibrary = true })
+                    BrowserView(browser: browser, settings: { pendingResumeID = nil; showSettings = true })
                 }
 
                 if isBlack { blackScreen }
