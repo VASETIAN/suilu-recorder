@@ -30,7 +30,7 @@ def generate():
     def field(name):
         return re.search(r'\b' + name + r':\s*"([^"]+)"', manifest).group(1)
     info = {
-        'CFBundleDevelopmentRegion': 'zh_CN', 'CFBundleDisplayName': '随录',
+        'CFBundleDevelopmentRegion': 'zh_CN', 'CFBundleDisplayName': '随心记',
         'CFBundleExecutable': '$(EXECUTABLE_NAME)',
         'CFBundleIdentifier': '$(PRODUCT_BUNDLE_IDENTIFIER)',
         'CFBundleInfoDictionaryVersion': '6.0', 'CFBundleName': '$(PRODUCT_NAME)',

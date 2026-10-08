@@ -16,6 +16,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Generate native project from App Playground
         run: python3 tools/generate_project.py
+      - name: Check mode selection and upgrade compatibility
+        run: python3 tools/check_video_modes.py
       - name: Build unsigned iPhoneOS App
         shell: bash
         run: |

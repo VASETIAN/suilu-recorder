@@ -6,6 +6,7 @@ import UIKit
 struct CameraPreview: UIViewRepresentable {
     @ObservedObject var recorder: RecorderController
     let pictureInPicture: RecorderPictureInPicture
+    let onBlackScreen: () -> Void
 
     func makeUIView(context: Context) -> CapturePreviewView {
         let view = CapturePreviewView()
@@ -13,6 +14,7 @@ struct CameraPreview: UIViewRepresentable {
         view.previewLayer.videoGravity = .resizeAspectFill
         view.onFocus = { recorder.focus(at: $0) }
         view.onZoom = { recorder.setZoom($0) }
+        view.onDoubleTap = onBlackScreen
         view.currentZoom = { recorder.zoom }
         view.onOrientation = {
             recorder.updateOrientation($0)
@@ -26,6 +28,7 @@ struct CameraPreview: UIViewRepresentable {
     }
 
     func updateUIView(_ view: CapturePreviewView, context: Context) {
+        view.onDoubleTap = onBlackScreen
         view.gesturesEnabled = recorder.isReady && !recorder.isConfiguring
         view.frontCamera = recorder.settings.frontCamera
         pictureInPicture.attach(source: view, recorder: recorder)
@@ -42,10 +45,12 @@ struct CameraPreview: UIViewRepresentable {
 }
 
 final class CapturePreviewView: UIView {
-    override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
-    var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
+    // One preview connection for the entire app. PiP temporarily moves this
+    // same layer rather than binding a second, off-screen camera preview.
+    let previewLayer = AVCaptureVideoPreviewLayer()
     var onFocus: ((CGPoint) -> Void)?
     var onZoom: ((CGFloat) -> Void)?
+    var onDoubleTap: (() -> Void)?
     var currentZoom: (() -> CGFloat)?
     var onOrientation: ((UIInterfaceOrientation) -> Void)?
     var onWindowChange: (() -> Void)?
@@ -58,7 +63,13 @@ final class CapturePreviewView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .black
-        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped(_:))))
+        layer.addSublayer(previewLayer)
+        let tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
+        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(doubleTapped))
+        doubleTap.numberOfTapsRequired = 2
+        tap.require(toFail: doubleTap)
+        addGestureRecognizer(tap)
+        addGestureRecognizer(doubleTap)
         addGestureRecognizer(UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:))))
         focusRing.fillColor = UIColor.clear.cgColor
         focusRing.strokeColor = UIColor.systemYellow.cgColor
@@ -67,14 +78,34 @@ final class CapturePreviewView: UIView {
         layer.addSublayer(focusRing)
         isAccessibilityElement = true
         accessibilityLabel = "相机预览"
-        accessibilityHint = "点击画面对焦，双指缩放。倍率按钮可直接选择变焦。"
+        accessibilityHint = "单击对焦，双指缩放；录像中双击进入黑屏。"
+        accessibilityCustomActions = [UIAccessibilityCustomAction(name: "进入黑屏", target: self, selector: #selector(accessibilityBlackScreen))]
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        if previewLayer.superlayer === layer {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            previewLayer.frame = bounds
+            CATransaction.commit()
+        }
         updateConnection()
+    }
+
+    func restorePreview() {
+        previewLayer.videoGravity = .resizeAspectFill
+        layer.insertSublayer(previewLayer, at: 0)
+        setNeedsLayout()
+    }
+
+    @objc private func doubleTapped() { if gesturesEnabled { onDoubleTap?() } }
+    @objc private func accessibilityBlackScreen() -> Bool {
+        guard gesturesEnabled else { return false }
+        onDoubleTap?()
+        return true
     }
 
     override func didMoveToWindow() {

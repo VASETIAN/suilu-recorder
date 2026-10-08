@@ -30,7 +30,7 @@ with zipfile.ZipFile(ipa) as archive:
     assert archive.testzip() is None
     assert len(archive.namelist()) == len(files)
 result = {'version': info['CFBundleShortVersionString'], 'build': info['CFBundleVersion'],
-    'bundle_identifier': info['CFBundleIdentifier'], 'platform': 'iPhoneOS', 'architecture': 'arm64',
+    'display_name': info['CFBundleDisplayName'], 'bundle_identifier': info['CFBundleIdentifier'], 'platform': 'iPhoneOS', 'architecture': 'arm64',
     'ipa_bytes': ipa.stat().st_size, 'sha256': hashlib.sha256(ipa.read_bytes()).hexdigest(),
     'signing': 'unsigned; sign locally with your own account before installing',
     'hardware_test': 'not run'}

@@ -14,8 +14,8 @@ enum RecorderLaunchRequest {
 }
 
 struct OpenRecorderCameraIntent: AppIntent {
-    static var title: LocalizedStringResource = "开启随录相机"
-    static var description = IntentDescription("在前台打开随录的拍摄界面。")
+    static var title: LocalizedStringResource = "开启随心记相机"
+    static var description = IntentDescription("在前台打开随心记的拍摄界面。")
     static var openAppWhenRun: Bool = true
     @MainActor
     func perform() async throws -> some IntentResult {

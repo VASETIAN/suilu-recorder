@@ -30,6 +30,7 @@ struct MediaItem: Codable, Identifiable, Equatable, Sendable {
     let camera: String
     var resolution: String
     let fps: Int?
+    var dynamicRange: String? = nil
     let hasAudio: Bool
     let location: CaptureLocation?
     var duration: Double?

@@ -60,6 +60,8 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
 
     override init() {
         super.init()
+        settings.captureMode = .video
+        captureSettings = settings
         installObservers()
         let timer = DispatchSource.makeTimerSource(queue: captureQueue)
         timer.schedule(deadline: .now() + 1, repeating: 1)
@@ -108,7 +110,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                 isConfiguring = false
                 isReady = false
                 status = "请在系统设置中允许相机权限"
-                showMessage("需要相机权限", "打开系统设置，允许随录访问相机，然后回到这里重试。")
+                showMessage("需要相机权限", "打开系统设置，允许随心记访问相机，然后回到这里重试。")
                 return
             }
             var requested = settings
@@ -252,7 +254,10 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
               AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
             throw RecorderError("相机权限未准备好，请允许相机权限后重试。")
         }
-        guard let device = Self.camera(front: requested.frontCamera) else { throw RecorderError("没有可用摄像头。") }
+        guard let device = Self.camera(front: requested.frontCamera,
+                                      mode: requested.captureMode == .video ? requested.mode : nil) else {
+            throw RecorderError("没有可用摄像头。")
+        }
         var applied = requested
         if applied.captureMode != .video {
             applied.captureMode = applied.livePhotoEnabled ? .livePhoto : .photo
@@ -264,6 +269,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             guard format != nil else { throw RecorderError("当前镜头没有支持的录像格式。") }
             applied.quality = chosen.quality
             applied.fps = chosen.fps
+            applied.dynamicRange = chosen.dynamicRange
         }
         let input: AVCaptureDeviceInput
         if let current = videoInput, current.device.uniqueID == device.uniqueID { input = current }
@@ -278,6 +284,10 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         let oldMinimum = device.activeVideoMinFrameDuration
         let oldMaximum = device.activeVideoMaxFrameDuration
         let oldZoom = device.videoZoomFactor
+        let oldColorSpace = device.activeColorSpace
+        let oldAutoHDR = device.automaticallyAdjustsVideoHDREnabled
+        let oldHDR = device.isVideoHDREnabled
+        let oldWideColor = session.automaticallyConfiguresCaptureDeviceForWideColor
         let newAudio: AVCaptureDeviceInput?
         if applied.microphoneEnabled && applied.captureMode != .photo {
             guard Self.hasPurposeString("NSMicrophoneUsageDescription"),
@@ -333,10 +343,16 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             defer { device.unlockForConfiguration() }
             if applied.captureMode == .video, let format = format {
                 // activeFormat selects inputPriority automatically on iOS.
+                session.automaticallyConfiguresCaptureDeviceForWideColor = false
                 device.activeFormat = format
+                device.automaticallyAdjustsVideoHDREnabled = false
+                if format.isVideoHDRSupported { device.isVideoHDREnabled = false }
+                device.activeColorSpace = chosen.dynamicRange == .hdr ? .HLG_BT2020 : .sRGB
                 let duration = CMTime(value: 1, timescale: CMTimeScale(chosen.fps))
                 device.activeVideoMinFrameDuration = duration
                 device.activeVideoMaxFrameDuration = duration
+            } else {
+                session.automaticallyConfiguresCaptureDeviceForWideColor = true
             }
             if device.isFocusModeSupported(.continuousAutoFocus) { device.focusMode = .continuousAutoFocus }
             if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
@@ -352,6 +368,15 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                 movieOutput.minFreeDiskSpaceLimit = applied.reserveBytes
                 movieOutput.movieFragmentInterval = CMTime(seconds: 5, preferredTimescale: 600)
                 if let connection = movieOutput.connection(with: .video) {
+                    let codecs = movieOutput.availableVideoCodecTypes
+                    if applied.dynamicRange == .hdr && !codecs.contains(.hevc) {
+                        throw RecorderError("当前输出无法录制 HEVC HDR，请选择 SDR。")
+                    }
+                    if codecs.contains(.hevc) {
+                        movieOutput.setOutputSettings([AVVideoCodecKey: AVVideoCodecType.hevc], for: connection)
+                    } else if codecs.contains(.h264) {
+                        movieOutput.setOutputSettings([AVVideoCodecKey: AVVideoCodecType.h264], for: connection)
+                    }
                     if connection.isVideoStabilizationSupported { connection.preferredVideoStabilizationMode = .standard }
                     if connection.isVideoMirroringSupported {
                         connection.automaticallyAdjustsVideoMirroring = false
@@ -376,12 +401,16 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                 device.activeFormat = oldFormat
                 device.activeVideoMinFrameDuration = oldMinimum
                 device.activeVideoMaxFrameDuration = oldMaximum
+                device.activeColorSpace = oldColorSpace
+                device.automaticallyAdjustsVideoHDREnabled = oldAutoHDR
+                if oldFormat.isVideoHDRSupported { device.isVideoHDREnabled = oldHDR }
                 device.videoZoomFactor = oldZoom
                 device.unlockForConfiguration()
             }
             videoInput = oldVideo
             audioInput = oldAudio
             captureSettings = oldSettings
+            session.automaticallyConfiguresCaptureDeviceForWideColor = oldWideColor
             if session.outputs.contains(where: { $0 === photoOutput }) {
                 photoOutput.isLivePhotoCaptureEnabled = photoOutput.isLivePhotoCaptureSupported && oldLiveEnabled
             }
@@ -389,7 +418,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         }
     }
 
-    static func camera(front: Bool) -> AVCaptureDevice? {
+    private static func cameras(front: Bool) -> [AVCaptureDevice] {
         let position: AVCaptureDevice.Position = front ? .front : .back
         let types: [AVCaptureDevice.DeviceType] = front
             ? [.builtInWideAngleCamera, .builtInTrueDepthCamera]
@@ -398,17 +427,23 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                                                         position: position).devices
         // Prefer a virtual multi-lens camera so pinch zoom can cross the 0.5x / 1x
         // boundary during a single recording when the device supports it.
-        for type in types {
-            if let device = devices.first(where: { $0.deviceType == type }) { return device }
-        }
-        return nil
+        return types.compactMap { type in devices.first(where: { $0.deviceType == type }) }
+    }
+
+    static func camera(front: Bool, mode: VideoMode? = nil) -> AVCaptureDevice? {
+        let devices = cameras(front: front)
+        // Some high-speed modes exist only on the physical main camera.
+        if let mode = mode, let exact = devices.first(where: { format(for: mode, device: $0) != nil }) { return exact }
+        return devices.first
     }
 
     static func modes(for device: AVCaptureDevice) -> [VideoMode] {
         VideoQuality.allCases.flatMap { quality in
-            [24, 30, 60].compactMap { fps in
-                let mode = VideoMode(quality: quality, fps: fps)
-                return format(for: mode, device: device) == nil ? nil : mode
+            [24, 30, 60, 120].flatMap { fps in
+                VideoDynamicRange.allCases.compactMap { range in
+                    let mode = VideoMode(quality: quality, fps: fps, dynamicRange: range)
+                    return format(for: mode, device: device) == nil ? nil : mode
+                }
             }
         }
     }
@@ -416,7 +451,18 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     static func format(for mode: VideoMode, device: AVCaptureDevice) -> AVCaptureDevice.Format? {
         device.formats.filter { format in
             let size = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            let subtype = CMFormatDescriptionGetMediaSubType(format.formatDescription)
+            let colorSupported: Bool
+            if mode.dynamicRange == .hdr {
+                colorSupported = subtype == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+                    && format.supportedColorSpaces.contains(.HLG_BT2020)
+            } else {
+                colorSupported = (subtype == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+                    || subtype == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
+                    && format.supportedColorSpaces.contains(.sRGB)
+            }
             return size.width == mode.quality.width && size.height == mode.quality.height
+                && colorSupported
                 && format.videoSupportedFrameRateRanges.contains {
                     $0.minFrameRate <= Double(mode.fps) && $0.maxFrameRate >= Double(mode.fps)
                 }
@@ -428,14 +474,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     }
 
     static func closestMode(to requested: VideoMode, in modes: [VideoMode]) -> VideoMode {
-        if modes.contains(requested) { return requested }
-        if let sameQuality = modes.filter({ $0.quality == requested.quality }).min(by: {
-            abs($0.fps - requested.fps) < abs($1.fps - requested.fps)
-        }) { return sameQuality }
-        return modes.min {
-            abs(Int($0.quality.width - requested.quality.width)) * 100 + abs($0.fps - requested.fps)
-                < abs(Int($1.quality.width - requested.quality.width)) * 100 + abs($1.fps - requested.fps)
-        } ?? requested
+        VideoMode.closest(to: requested, in: modes)
     }
 
     private static func displayZoomScale(_ device: AVCaptureDevice) -> CGFloat {
@@ -455,7 +494,8 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
 
     private func publishCapabilities() {
         guard let device = videoInput?.device else { return }
-        let modes = Self.modes(for: device)
+        let modes = Array(Set(Self.cameras(front: captureSettings.frontCamera).flatMap { Self.modes(for: $0) }))
+            .sorted { ($0.quality.width, $0.fps, $0.dynamicRange.rawValue) < ($1.quality.width, $1.fps, $1.dynamicRange.rawValue) }
         let limits = zoomLimits(device)
         let low = limits.lowerBound / zoomScale
         let high = limits.upperBound / zoomScale
@@ -677,6 +717,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                   camera: captureSettings.frontCamera ? "前置摄像头" : "后置摄像头",
                   resolution: kind == .video ? "\(captureSettings.quality.width) × \(captureSettings.quality.height)" : "待处理",
                   fps: kind == .video ? captureSettings.fps : nil,
+                  dynamicRange: kind == .video ? captureSettings.dynamicRange.title : nil,
                   hasAudio: captureSettings.microphoneEnabled && kind != .photo, location: location)
     }
 

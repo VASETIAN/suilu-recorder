@@ -10,7 +10,7 @@ final class RecorderPictureInPicture: NSObject, ObservableObject, AVPictureInPic
     @Published private(set) var isStarting = false
     @Published private(set) var isPossible = false
     private weak var recorder: RecorderController?
-    private weak var sourceView: UIView?
+    private weak var sourceView: CapturePreviewView?
     private var controller: AVPictureInPictureController?
     private var cameraView: PiPCameraView?
     private var observation: NSKeyValueObservation?
@@ -35,30 +35,30 @@ final class RecorderPictureInPicture: NSObject, ObservableObject, AVPictureInPic
             && recorder?.multitaskingCameraSupported == true && recorder?.phase == .recording
     }
 
-    func attach(source: UIView, recorder: RecorderController) {
+    func attach(source: CapturePreviewView, recorder: RecorderController) {
         guard source.window != nil else { return }
-        if sourceView === source && controller != nil { return }
-        detach()
-        self.recorder = recorder
-        sourceView = source
-        recorder.onStopPictureInPicture = { [weak self] in
-            Task { @MainActor in self?.stop() }
+        if sourceView !== source || self.recorder !== recorder {
+            detach()
+            self.recorder = recorder
+            sourceView = source
+            recorder.onStopPictureInPicture = { [weak self] in
+                Task { @MainActor in self?.stop() }
+            }
         }
-        guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
+        guard controller == nil, recorder.multitaskingCameraSupported,
+              audioCapabilityLoaded, AVPictureInPictureController.isPictureInPictureSupported() else { return }
         let camera = PiPCameraView()
-        camera.previewLayer.session = recorder.session
-        camera.previewLayer.videoGravity = .resizeAspect
         let content = AVPictureInPictureVideoCallViewController()
-        // A normal camera aspect ratio; AVKit owns the actual window size.
-        content.preferredContentSize = CGSize(width: 180, height: 320)
+        // A compact landscape preference. AVKit owns the minimum and user zoom.
+        content.preferredContentSize = CGSize(width: 160, height: 90)
         camera.frame = content.view.bounds
         camera.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         content.view.addSubview(camera)
-        let label = UILabel(frame: CGRect(x: 10, y: 8, width: 100, height: 26))
+        let label = UILabel(frame: CGRect(x: 6, y: 6, width: 64, height: 22))
         label.text = "● REC"
         label.textColor = .systemRed
         label.backgroundColor = UIColor.black.withAlphaComponent(0.65)
-        label.font = .monospacedSystemFont(ofSize: 14, weight: .bold)
+        label.font = .monospacedSystemFont(ofSize: 11, weight: .bold)
         label.textAlignment = .center
         label.accessibilityLabel = "正在录像"
         content.view.addSubview(label)
@@ -80,7 +80,7 @@ final class RecorderPictureInPicture: NSObject, ObservableObject, AVPictureInPic
     }
 
     func updateOrientation(_ interface: UIInterfaceOrientation, front: Bool) {
-        guard let connection = cameraView?.previewLayer.connection else { return }
+        guard let connection = sourceView?.previewLayer.connection else { return }
         if connection.isVideoOrientationSupported {
             switch interface {
             case .landscapeLeft: connection.videoOrientation = .landscapeLeft
@@ -102,6 +102,9 @@ final class RecorderPictureInPicture: NSObject, ObservableObject, AVPictureInPic
         }
         requested = true
         isStarting = true
+        if let source = sourceView {
+            cameraView?.show(source.previewLayer)
+        }
         // Reserve only a bounded transition for the explicit native PiP request.
         recorder?.setPictureInPictureState(.starting)
         controller.startPictureInPicture()
@@ -116,6 +119,10 @@ final class RecorderPictureInPicture: NSObject, ObservableObject, AVPictureInPic
             recorder?.setPictureInPictureState(.inactive)
             controller?.stopPictureInPicture()
         }
+        if let source = sourceView, source.previewLayer.superlayer !== source.layer {
+            source.restorePreview()
+        }
+        cameraView?.previewLayer = nil
     }
 
     func detach(source: UIView? = nil) {
@@ -125,7 +132,6 @@ final class RecorderPictureInPicture: NSObject, ObservableObject, AVPictureInPic
         observation = nil
         controller?.delegate = nil
         controller = nil
-        cameraView?.previewLayer.session = nil
         cameraView = nil
         sourceView = nil
         isPossible = false
@@ -190,6 +196,19 @@ final class RecorderPictureInPicture: NSObject, ObservableObject, AVPictureInPic
 }
 
 private final class PiPCameraView: UIView {
-    override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
-    var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
+    weak var previewLayer: AVCaptureVideoPreviewLayer?
+    func show(_ preview: AVCaptureVideoPreviewLayer) {
+        previewLayer = preview
+        preview.videoGravity = .resizeAspect
+        layer.addSublayer(preview)
+        setNeedsLayout()
+        layoutIfNeeded()
+    }
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        previewLayer?.frame = bounds
+        CATransaction.commit()
+    }
 }

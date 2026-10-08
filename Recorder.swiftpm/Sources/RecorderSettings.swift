@@ -20,11 +20,29 @@ enum VideoQuality: String, Codable, CaseIterable, Identifiable, Hashable {
     var height: Int32 { width * 9 / 16 }
 }
 
+enum VideoDynamicRange: String, Codable, CaseIterable, Identifiable, Sendable {
+    case sdr, hdr
+    var id: String { rawValue }
+    var title: String { rawValue.uppercased() }
+}
+
 struct VideoMode: Hashable, Identifiable {
     let quality: VideoQuality
     let fps: Int
-    var id: String { "\(quality.rawValue)-\(fps)" }
-    var title: String { "\(quality.title) · \(fps) fps" }
+    var dynamicRange: VideoDynamicRange = .sdr
+    var id: String { "\(quality.rawValue)-\(fps)-\(dynamicRange.rawValue)" }
+    var title: String { "\(quality.title) · \(fps) fps · \(dynamicRange.title)" }
+
+    static func closest(to requested: Self, in modes: [Self]) -> Self {
+        // Prefer resolution, then frame rate, then dynamic range. Never invent
+        // an unsupported combination when changing cameras or quality.
+        func distance(_ mode: Self) -> Int {
+            abs(Int(mode.quality.width - requested.quality.width)) * 1000
+                + abs(mode.fps - requested.fps) * 10
+                + (mode.dynamicRange == requested.dynamicRange ? 0 : 1)
+        }
+        return modes.min { distance($0) < distance($1) } ?? requested
+    }
 }
 
 enum BlackScreenRecovery: String, Codable, CaseIterable, Identifiable {
@@ -54,6 +72,7 @@ enum CaptureMode: String, Codable, CaseIterable, Identifiable, Sendable {
 struct RecorderSettings: Codable, Equatable, Sendable {
     var quality: VideoQuality = .hd1080
     var fps = 30
+    var dynamicRange: VideoDynamicRange = .sdr
     var frontCamera = false
     var microphoneEnabled = true
     var recovery: BlackScreenRecovery = .doubleTap
@@ -63,7 +82,7 @@ struct RecorderSettings: Codable, Equatable, Sendable {
     var livePhotoEnabled = false
     var dimBlackScreen = true
     var includeLocation = true
-    var mode: VideoMode { VideoMode(quality: quality, fps: fps) }
+    var mode: VideoMode { VideoMode(quality: quality, fps: fps, dynamicRange: dynamicRange) }
     var reserveBytes: Int64 { Int64(reserveMB) * 1_048_576 }
 
     static func load() -> RecorderSettings {
@@ -75,6 +94,7 @@ struct RecorderSettings: Codable, Equatable, Sendable {
                let old = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 value.quality = VideoQuality(rawValue: old["quality"] as? String ?? "") ?? .hd1080
                 value.fps = old["fps"] as? Int ?? 30
+                value.dynamicRange = VideoDynamicRange(rawValue: old["dynamicRange"] as? String ?? "") ?? .sdr
                 value.frontCamera = old["frontCamera"] as? Bool ?? false
                 value.microphoneEnabled = old["microphoneEnabled"] as? Bool ?? true
                 value.recovery = BlackScreenRecovery(rawValue: old["recovery"] as? String ?? "") ?? .doubleTap
@@ -85,11 +105,11 @@ struct RecorderSettings: Codable, Equatable, Sendable {
                 value.dimBlackScreen = old["dimBlackScreen"] as? Bool ?? true
                 value.includeLocation = old["includeLocation"] as? Bool ?? true
             }
-            if ![24, 30, 60].contains(value.fps) { value.fps = 30 }
+            if ![24, 30, 60, 120].contains(value.fps) { value.fps = 30 }
             if ![512, 1024, 2048].contains(value.reserveMB) { value.reserveMB = 512 }
             return value
         }
-        if ![24, 30, 60].contains(value.fps) { value.fps = 30 }
+        if ![24, 30, 60, 120].contains(value.fps) { value.fps = 30 }
         if ![512, 1024, 2048].contains(value.reserveMB) { value.reserveMB = 512 }
         return value
     }

@@ -17,7 +17,8 @@ struct ContentView: View {
             let landscape = geometry.size.width > geometry.size.height
             ZStack {
                 Color.black.ignoresSafeArea()
-                CameraPreview(recorder: recorder, pictureInPicture: pictureInPicture)
+                CameraPreview(recorder: recorder, pictureInPicture: pictureInPicture,
+                              onBlackScreen: { setBlackScreen(true) })
                     .ignoresSafeArea().accessibilityHidden(isBlack)
                 LinearGradient(colors: [.black.opacity(0.75), .clear, .clear, .black.opacity(0.85)],
                                startPoint: .top, endPoint: .bottom)
@@ -38,6 +39,8 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .statusBarHidden(isBlack)
+        .persistentSystemOverlays(isBlack ? .hidden : .automatic)
         .sheet(isPresented: $showSettings) {
             SettingsView(recorder: recorder, location: location, pictureInPicture: pictureInPicture)
         }
@@ -87,12 +90,11 @@ struct ContentView: View {
                         Circle().fill(.red).frame(width: 8, height: 8)
                         Text(recorder.elapsedLabel).monospacedDigit().font(.headline)
                     } else {
-                        Text("随录").font(.headline)
+                        Text("随心记").font(.headline)
                     }
-                    Text(recorder.settings.captureMode == .video ? recorder.settings.mode.title : recorder.settings.captureMode.title)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.white.opacity(0.8))
                 }
+                Text(recorder.settings.captureMode == .video ? recorder.settings.mode.title : recorder.settings.captureMode.title)
+                    .font(.caption.weight(.medium)).foregroundStyle(.white.opacity(0.8)).lineLimit(1)
                 Text("剩余 \(RecorderFiles.sizeLabel(recorder.availableSpace))")
                     .font(.caption).foregroundStyle(.white.opacity(0.75))
                 if recorder.settings.includeLocation {
@@ -101,10 +103,8 @@ struct ContentView: View {
                 }
             }
             Spacer(minLength: 8)
-            Button { showLibrary = true } label: {
-                Image(systemName: "photo.on.rectangle.angled").font(.title3)
-                    .frame(width: 44, height: 44).background(.black.opacity(0.35), in: Circle())
-            }.disabled(!recorder.canConfigure).accessibilityLabel("内置图库")
+            if recorder.settings.captureMode == .video { pictureInPictureButton }
+            else { livePhotoButton }
             Button(action: recorder.toggleTorch) {
                 Image(systemName: recorder.torchOn ? "flashlight.on.fill" : "flashlight.off.fill")
                     .font(.title3)
@@ -193,7 +193,6 @@ struct ContentView: View {
                     }.disabled(!recorder.canConfigure)
                 }
             }
-            VStack(spacing: 3) {
             HStack(spacing: 10) {
                 ForEach(recorder.zoomStops, id: \.self) { value in
                     Button { recorder.setZoom(value) } label: {
@@ -210,17 +209,11 @@ struct ContentView: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.white.opacity(0.7))
                     .accessibilityLabel("当前倍率 \(Double(recorder.zoom), specifier: "%.1f") 倍")
-                if recorder.settings.captureMode == .video { pictureInPictureButton }
-                else { livePhotoButton }
             }
-            if recorder.settings.captureMode == .video {
-                Text(pictureInPicture.status).font(.caption2).foregroundStyle(.white.opacity(0.7))
-                    .lineLimit(2).multilineTextAlignment(.center)
-            }
-            }
+            .frame(height: 44)
             HStack(spacing: 24) {
-                cameraButton(symbol: "rectangle.fill", title: "黑屏", enabled: recorder.phase == .recording) {
-                    setBlackScreen(true)
+                cameraButton(symbol: "photo.on.rectangle.angled", title: "相册", enabled: recorder.canConfigure) {
+                    showLibrary = true
                 }
                 Spacer(minLength: 0)
                 captureButton
@@ -233,6 +226,7 @@ struct ContentView: View {
                  : recorder.phase.blocksConfiguration ? recorder.phase.title : recorder.status)
                 .font(.caption).foregroundStyle(.white.opacity(0.8))
                 .multilineTextAlignment(.center).lineLimit(2)
+                .frame(height: 32)
         }
         .foregroundStyle(.white)
     }

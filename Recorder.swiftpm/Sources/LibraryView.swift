@@ -112,6 +112,7 @@ private struct MediaDetailView: View {
                             detailRow("摄像头", item.camera)
                             detailRow("分辨率", item.resolution)
                             if let fps = item.fps { detailRow("帧率", "\(fps) fps") }
+                            if let range = item.dynamicRange { detailRow("动态范围", range) }
                             if let seconds = item.duration { detailRow("时长", String(format: "%.1f 秒", seconds)) }
                             detailRow("声音", item.hasAudio ? "有声" : "无声")
                             detailRow("文件大小", RecorderFiles.sizeLabel(item.size))

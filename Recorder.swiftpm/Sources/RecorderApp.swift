@@ -14,8 +14,8 @@ struct RecorderApp: App {
 
 @MainActor
 private struct RecorderLaunchView: View {
-    // Opening a playground renders its preview immediately. Do not construct a
-    // capture session or request protected resources until the user starts it.
+    // Construct after SwiftUI mounts the launch view. Static Xcode previews
+    // stay opt-in, while a running app opens the camera directly.
     @State private var recorder: RecorderController? = nil
 
     var body: some View {
@@ -23,28 +23,20 @@ private struct RecorderLaunchView: View {
             if let recorder = recorder {
                 ContentView(recorder: recorder)
             } else {
-                VStack(spacing: 22) {
-                    Image(systemName: "video.circle.fill")
-                        .font(.system(size: 80)).foregroundColor(.red)
-                    Text("随录").font(.largeTitle.bold())
-                    Text("拍照 · Live Photo · 录像 · 内置图库").foregroundColor(.secondary)
-                    Button {
-                        recorder = RecorderController()
-                    } label: {
-                        Label("开启相机", systemImage: "camera.fill")
-                            .font(.headline).padding(.horizontal, 24).padding(.vertical, 10)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    Text("开启后按提示授权，即可拍摄。内容先保存在内置图库。")
-                        .font(.footnote).foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
+                ZStack {
+                    Color.black.ignoresSafeArea()
+                    if ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1" {
+                        Button("预览相机") { recorder = RecorderController() }.buttonStyle(.borderedProminent)
+                    } else { ProgressView("正在打开相机…").tint(.white) }
                 }
-                .padding(28)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color.black.ignoresSafeArea())
             }
         }
-        .onAppear { handleLaunchRequest() }
+        .task {
+            if recorder == nil && ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] != "1" {
+                recorder = RecorderController()
+            }
+            handleLaunchRequest()
+        }
         .onReceive(NotificationCenter.default.publisher(for: RecorderLaunchRequest.notification)) { _ in
             handleLaunchRequest()
         }

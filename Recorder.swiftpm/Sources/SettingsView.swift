@@ -23,7 +23,12 @@ struct SettingsView: View {
         VideoQuality.allCases.filter { quality in recorder.supportedModes.contains { $0.quality == quality } }
     }
     private var frameRates: [Int] {
-        recorder.supportedModes.filter { $0.quality == draft.quality }.map { $0.fps }.sorted()
+        Array(Set(recorder.supportedModes.filter { $0.quality == draft.quality }.map { $0.fps })).sorted()
+    }
+    private var dynamicRanges: [VideoDynamicRange] {
+        VideoDynamicRange.allCases.filter { range in
+            recorder.supportedModes.contains { $0.quality == draft.quality && $0.fps == draft.fps && $0.dynamicRange == range }
+        }
     }
 
     var body: some View {
@@ -39,15 +44,20 @@ struct SettingsView: View {
                         Picker("帧率", selection: $draft.fps) {
                             ForEach(frameRates, id: \.self) { Text("\($0) fps").tag($0) }
                         }
+                        Picker("动态范围", selection: $draft.dynamicRange) {
+                            ForEach(dynamicRanges) { Text($0.title).tag($0) }
+                        }
                     }
                     Toggle("录制麦克风声音", isOn: $draft.microphoneEnabled)
                         .disabled(draft.captureMode == .photo)
-                    Text("画质和帧率按当前镜头筛选。翻转镜头后，不支持的组合会自动调整。前置预览为镜像，保存的视频为正常方向。")
+                    Text("最高 4K · 120fps，按设备实际能力显示；HDR 使用 10 位 HEVC。部分高速模式需要主摄，切换后可用倍率会变化。不支持的组合自动调整。前置预览为镜像，保存为正常方向。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .disabled(!recorder.canConfigure)
 
                 Section("黑屏模式") {
+                    Text("录像中双击取景器进入黑屏，也可用下方设置自动进入。")
+                        .font(.caption).foregroundStyle(.secondary)
                     Picker("恢复方式", selection: $draft.recovery) {
                         ForEach(BlackScreenRecovery.allCases) { Text($0.title).tag($0) }
                     }
@@ -65,7 +75,7 @@ struct SettingsView: View {
                     LabeledContent("系统画中画", value: pictureInPicture.status)
                     Text("开始录像后手动点击主界面的‘画中画’，等实时小窗出现后再返回主屏幕。仅系统允许多任务相机的环境可以继续录像。关闭后台小窗、将小窗收起或相机被中断时停止并保存；回到前台后关闭画中画可继续录像。")
                         .font(.caption).foregroundStyle(.secondary)
-                    Text("小窗保留实时画面和 REC 标识，尺寸由系统管理。iPad 支持状态不代表 iPhone 支持；普通 iPhone 运行环境可能不允许多任务相机。工程不注册通话或 VoIP 服务，不能赋予系统未提供的相机权限。")
+                    Text("小窗保留实时画面和 REC 标识，最终尺寸由系统管理。普通 iPhone 录像 App 没有后台相机权限；不支持时返回主屏幕会停止并保存，回来后可以再次录像。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
 
@@ -107,12 +117,12 @@ struct SettingsView: View {
                 Section("快捷启动") {
                     Text("Swift Playgrounds 运行：可将控制中心的“打开 App”设为 Swift Playgrounds，再进入此工程运行。系统不把运行预览注册成独立 App。")
                         .font(.subheadline)
-                    Text("独立安装随录后：控制中心可选择“打开 App → 随录”；也可把快捷指令“开启随录相机”加入控制中心。快捷入口只在前台打开相机，不会在后台或锁屏摄像。")
+                    Text("独立安装随心记后：控制中心可选择“打开 App → 随心记”；也可把快捷指令“开启随心记相机”加入控制中心。快捷入口只在前台打开相机，不会在后台或锁屏摄像。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
 
-                Section("关于随录") {
-                    LabeledContent("版本", value: "2.2.1")
+                Section("关于随心记") {
+                    LabeledContent("版本", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.3.0")
                     Text("个人录像工具 · 使用 Apple AVFoundation 与 PhotoKit。照片为 JPEG，视频为 MOV，Live Photo 保留配对的照片与动态片段。2× 在部分设备上属于数字变焦；0.5× 仅在当前摄像头和格式支持时显示。")
                         .font(.caption).foregroundStyle(.secondary)
                     Text("录像方向在开始时确定。录制中旋转设备会调整预览和操作界面，文件保持开始时的方向。横屏录像请先横放设备再开始。")
@@ -133,7 +143,9 @@ struct SettingsView: View {
             }
             .onChange(of: draft.quality) { _ in
                 if !frameRates.contains(draft.fps) { draft.fps = frameRates.contains(30) ? 30 : frameRates.first ?? 30 }
+                clampDynamicRange()
             }
+            .onChange(of: draft.fps) { _ in clampDynamicRange() }
             .onAppear { recorder.refreshLibrary() }
             .sheet(isPresented: $showLibrary) { LibraryView(recorder: recorder) }
             .interactiveDismissDisabled(recorder.phase.blocksConfiguration)
@@ -143,6 +155,10 @@ struct SettingsView: View {
                              set: { recorder.message = $0 })) { value in
             Alert(title: Text(value.title), message: Text(value.detail), dismissButton: .default(Text("知道了")))
         }
+    }
+
+    private func clampDynamicRange() {
+        if !dynamicRanges.contains(draft.dynamicRange) { draft.dynamicRange = dynamicRanges.first ?? .sdr }
     }
 
     private func capturePermissionLabel(_ media: AVMediaType) -> String {
