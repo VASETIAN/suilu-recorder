@@ -13,9 +13,6 @@ struct CameraPreview: UIViewRepresentable {
         view.previewLayer.session = recorder.session
         view.previewLayer.videoGravity = .resizeAspectFill
         view.onFocus = { recorder.focus(at: $0) }
-        view.onLockFocus = { recorder.lockFocusAndExposure() }
-        view.onExposure = { recorder.setExposureBias($0) }
-        view.currentExposure = { recorder.exposureBias }
         view.onZoom = { recorder.setZoom($0) }
         view.onDoubleTap = onBlackScreen
         view.currentZoom = { recorder.zoom }
@@ -34,7 +31,6 @@ struct CameraPreview: UIViewRepresentable {
         view.onDoubleTap = onBlackScreen
         view.gesturesEnabled = recorder.isReady && !recorder.isConfiguring
             && (recorder.phase == .idle || recorder.phase == .recording)
-        view.updateFeedback(locked: recorder.focusExposureLocked, exposure: recorder.exposureBias)
         view.frontCamera = recorder.settings.frontCamera
         pictureInPicture.attach(source: view, recorder: recorder)
         view.updateConnection()
@@ -49,14 +45,11 @@ struct CameraPreview: UIViewRepresentable {
     }
 }
 
-final class CapturePreviewView: UIView, UIGestureRecognizerDelegate {
+final class CapturePreviewView: UIView {
     // One preview connection for the entire app. PiP temporarily moves this
     // same layer rather than binding a second, off-screen camera preview.
     let previewLayer = AVCaptureVideoPreviewLayer()
     var onFocus: ((CGPoint) -> Void)?
-    var onLockFocus: (() -> Void)?
-    var onExposure: ((Float) -> Void)?
-    var currentExposure: (() -> Float)?
     var onZoom: ((CGFloat) -> Void)?
     var onDoubleTap: (() -> Void)?
     var currentZoom: (() -> CGFloat)?
@@ -67,9 +60,6 @@ final class CapturePreviewView: UIView, UIGestureRecognizerDelegate {
     var gesturesEnabled = false
     private var pinchStart: CGFloat = 1
     private let focusRing = CAShapeLayer()
-    private let exposureLabel = UILabel()
-    private var exposureStart: Float = 0
-    private var feedbackUntil = Date.distantPast
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -82,35 +72,16 @@ final class CapturePreviewView: UIView, UIGestureRecognizerDelegate {
         addGestureRecognizer(tap)
         addGestureRecognizer(doubleTap)
         addGestureRecognizer(UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:))))
-        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(locked(_:)))
-        longPress.minimumPressDuration = 0.7
-        addGestureRecognizer(longPress)
-        let exposurePan = UIPanGestureRecognizer(target: self, action: #selector(exposurePanned(_:)))
-        exposurePan.maximumNumberOfTouches = 1
-        exposurePan.delegate = self
-        addGestureRecognizer(exposurePan)
         focusRing.fillColor = UIColor.clear.cgColor
         focusRing.strokeColor = UIColor.systemYellow.cgColor
         focusRing.lineWidth = 2
         focusRing.opacity = 0
         layer.addSublayer(focusRing)
-        exposureLabel.textColor = .systemYellow
-        exposureLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
-        exposureLabel.textAlignment = .center
-        exposureLabel.backgroundColor = UIColor.black.withAlphaComponent(0.55)
-        exposureLabel.layer.cornerRadius = 6
-        exposureLabel.clipsToBounds = true
-        exposureLabel.isHidden = true
-        addSubview(exposureLabel)
         isAccessibilityElement = true
         accessibilityLabel = "相机预览"
-        accessibilityHint = "单击对焦并解除锁定，长按锁定当前对焦和曝光，上下滑动调明暗，双指缩放；双击进入黑屏。"
-        accessibilityCustomActions = [
-            UIAccessibilityCustomAction(name: "进入黑屏", target: self, selector: #selector(accessibilityBlackScreen)),
-            UIAccessibilityCustomAction(name: "锁定对焦和曝光", target: self, selector: #selector(accessibilityLock)),
-            UIAccessibilityCustomAction(name: "解除锁定并对焦", target: self, selector: #selector(accessibilityFocus)),
-            UIAccessibilityCustomAction(name: "调亮", target: self, selector: #selector(accessibilityBrighter)),
-            UIAccessibilityCustomAction(name: "调暗", target: self, selector: #selector(accessibilityDarker))]
+        accessibilityHint = "单击对焦，双指缩放；录像中或拍照界面双击进入黑屏。"
+        accessibilityCustomActions = [UIAccessibilityCustomAction(name: "进入黑屏", target: self, selector: #selector(accessibilityBlackScreen)),
+            UIAccessibilityCustomAction(name: "对焦", target: self, selector: #selector(accessibilityFocus))]
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -167,16 +138,9 @@ final class CapturePreviewView: UIView, UIGestureRecognizerDelegate {
     @objc private func tapped(_ gesture: UITapGestureRecognizer) {
         guard gesturesEnabled else { return }
         let point = gesture.location(in: self)
-        showFocusFeedback(at: point)
         // The layer conversion accounts for rotation, aspect-fill cropping and
         // front-camera preview mirroring; view coordinates alone are insufficient.
         onFocus?(previewLayer.captureDevicePointConverted(fromLayerPoint: point))
-    }
-
-    private func showFocusFeedback(at point: CGPoint) {
-        feedbackUntil = Date().addingTimeInterval(3)
-        exposureLabel.frame = CGRect(x: min(max(8, point.x - 80), max(8, bounds.width - 168)),
-                                     y: min(point.y + 38, max(0, bounds.height - 30)), width: 160, height: 26)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         focusRing.path = UIBezierPath(roundedRect: CGRect(x: point.x - 32, y: point.y - 32,
@@ -190,48 +154,11 @@ final class CapturePreviewView: UIView, UIGestureRecognizerDelegate {
         focusRing.add(fade, forKey: "focusFeedback")
     }
 
-    func updateFeedback(locked: Bool, exposure: Float) {
-        exposureLabel.text = (locked ? "AE/AF 锁定 · " : "") + String(format: "%+.1f EV", exposure)
-        exposureLabel.isHidden = !gesturesEnabled || (!locked && feedbackUntil < Date())
-        focusRing.opacity = locked && gesturesEnabled ? 1 : 0
-        accessibilityValue = (locked ? "对焦曝光已锁定，" : "") + String(format: "曝光 %+.1f EV", exposure)
-    }
-
-    @objc private func locked(_ gesture: UILongPressGestureRecognizer) {
-        guard gesturesEnabled, gesture.state == .began else { return }
-        showFocusFeedback(at: gesture.location(in: self))
-        onLockFocus?()
-    }
-
-    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        guard gesturesEnabled else { return false }
-        if let pan = gestureRecognizer as? UIPanGestureRecognizer {
-            let velocity = pan.velocity(in: self)
-            return abs(velocity.y) > abs(velocity.x)
-        }
-        return true
-    }
-
-    @objc private func exposurePanned(_ gesture: UIPanGestureRecognizer) {
-        guard gesturesEnabled else { return }
-        if gesture.state == .began {
-            exposureStart = currentExposure?() ?? 0
-            showFocusFeedback(at: gesture.location(in: self))
-        }
-        if gesture.state == .began || gesture.state == .changed {
-            feedbackUntil = Date().addingTimeInterval(3)
-            onExposure?(exposureStart - Float(gesture.translation(in: self).y / 100))
-        }
-    }
-
-    @objc private func accessibilityLock() -> Bool { guard gesturesEnabled else { return false }; onLockFocus?(); return true }
     @objc private func accessibilityFocus() -> Bool {
         guard gesturesEnabled else { return false }
         onFocus?(previewLayer.captureDevicePointConverted(fromLayerPoint: CGPoint(x: bounds.midX, y: bounds.midY)))
         return true
     }
-    @objc private func accessibilityBrighter() -> Bool { guard gesturesEnabled else { return false }; onExposure?((currentExposure?() ?? 0) + 0.3); return true }
-    @objc private func accessibilityDarker() -> Bool { guard gesturesEnabled else { return false }; onExposure?((currentExposure?() ?? 0) - 0.3); return true }
 
     @objc private func pinched(_ gesture: UIPinchGestureRecognizer) {
         guard gesturesEnabled else { return }

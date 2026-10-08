@@ -122,7 +122,7 @@ struct SettingsView: View {
                         .font(.caption).foregroundStyle(.secondary)
                     Text("负载升高时提醒降低帧率；达到严重状态时停止保存并暂停相机，恢复后需重新录像。不会悄悄改变 SDR／HDR 或帧率。关闭保护也不能阻止系统自行中断相机。")
                         .font(.caption).foregroundStyle(.secondary)
-                    Text("取景器单击对焦，长按锁定当前对焦和曝光，单击解除；上下滑动调节曝光。调整仍使用苹果原生相机接口。")
+                    Text("单击取景器对焦，会显示黄色对焦框；相机继续使用苹果原生自动曝光。双指缩放，双击进入黑屏。")
                         .font(.caption).foregroundStyle(.secondary)
                 }.disabled(!recorder.canConfigure)
 
@@ -142,7 +142,7 @@ struct SettingsView: View {
                 }
 
                 Section("关于随心记") {
-                    LabeledContent("版本", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.5.0")
+                    LabeledContent("版本", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.3.0")
                     Text("使用 Apple 原生拍摄、画质优先处理、自动白平衡和支持时的镜头畸变校正。原照片直接保存，App 不加美颜或 AI 滤镜。系统是否使用多帧融合等处理由设备和场景决定，成片不保证与系统相机所有模式一致。")
                         .font(.caption).foregroundStyle(.secondary)
                     Text("开始前选择长焦倍率会使用真实长焦镜头；受格式能力限制，可能自动降低帧率。4K120 通常需要主摄。其他倍率可能是传感器裁切或数字变焦。照片 JPEG、视频 MOV，Live Photo 保留配对文件。")

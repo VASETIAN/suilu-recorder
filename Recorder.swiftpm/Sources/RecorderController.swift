@@ -32,8 +32,6 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     @Published private(set) var lastCameraError = UserDefaults.standard.string(forKey: "Recorder.lastCameraError")
     @Published var message: RecorderMessage?
     @Published private(set) var resumeRequest: UUID?
-    @Published private(set) var focusExposureLocked = false
-    @Published private(set) var exposureBias: Float = 0
     @Published private(set) var captureLoad: CaptureLoad = .normal
     @Published private(set) var thumbnailGeneration = 0
     @Published private(set) var exportingPhotoIDs: Set<UUID> = []
@@ -428,6 +426,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             }
             if device.isFocusModeSupported(.continuousAutoFocus) { device.focusMode = .continuousAutoFocus }
             if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
+            device.setExposureTargetBias(0, completionHandler: nil)
             if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) { device.whiteBalanceMode = .continuousAutoWhiteBalance }
             device.isSubjectAreaChangeMonitoringEnabled = true
             if device.hasTorch && device.isTorchModeSupported(.off) { device.torchMode = .off }
@@ -463,8 +462,6 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                 guard let self = self else { return }
                 self.captureQueue.async { self.readCaptureLoadOnQueue() }
             }
-            let bias = device.exposureTargetBias
-            publish { self.focusExposureLocked = false; self.exposureBias = bias }
             configured = true
             if applied.captureMode == .video && chosen != requested.mode {
                 publish { self.showMessage("已调整录像格式", "已选用当前镜头支持的 \(chosen.title)。") }
@@ -690,38 +687,11 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                     device.exposureMode = .continuousAutoExposure
                 }
                 device.isSubjectAreaChangeMonitoringEnabled = true
-                self.publish { self.focusExposureLocked = false }
             } catch { self.report("对焦失败", error.localizedDescription) }
         }
     }
 
-    func lockFocusAndExposure() {
-        captureQueue.async {
-            guard let device = self.videoInput?.device, self.configured, self.foreground else { return }
-            do {
-                try device.lockForConfiguration()
-                defer { device.unlockForConfiguration() }
-                guard device.isFocusModeSupported(.locked) || device.isExposureModeSupported(.locked) else { return }
-                if device.isFocusModeSupported(.locked) { device.focusMode = .locked }
-                if device.isExposureModeSupported(.locked) { device.exposureMode = .locked }
-                device.isSubjectAreaChangeMonitoringEnabled = false
-                self.publish { self.focusExposureLocked = true }
-            } catch { self.report("无法锁定对焦", error.localizedDescription) }
-        }
-    }
 
-    func setExposureBias(_ requested: Float) {
-        captureQueue.async {
-            guard let device = self.videoInput?.device, self.configured, self.foreground else { return }
-            do {
-                try device.lockForConfiguration()
-                defer { device.unlockForConfiguration() }
-                let value = min(max(requested, device.minExposureTargetBias), device.maxExposureTargetBias)
-                device.setExposureTargetBias(value, completionHandler: nil)
-                self.publish { self.exposureBias = value }
-            } catch { self.report("曝光调节失败", error.localizedDescription) }
-        }
-    }
 
     func toggleTorch() {
         captureQueue.async {
