@@ -161,6 +161,26 @@ struct ContentView: View {
         .accessibilityValue(enabled ? "已开启" : "已关闭")
     }
 
+    private var pictureInPictureButton: some View {
+        let enabled = pictureInPicture.isActive || pictureInPicture.isStarting
+        return Button {
+            if enabled { pictureInPicture.stop() }
+            else { setBlackScreen(false); pictureInPicture.start() }
+        } label: {
+            VStack(spacing: 3) {
+                Image(systemName: enabled ? "pip.exit" : "pip.enter").font(.title3)
+                Text("画中画").font(.system(size: 9, weight: .semibold))
+            }
+            .foregroundStyle(enabled ? .yellow : .white)
+            .frame(width: 44, height: 44)
+            .background(.black.opacity(0.35), in: Circle())
+        }
+        .disabled(!pictureInPicture.canStart && !enabled)
+        .opacity(pictureInPicture.canStart || enabled ? 1 : 0.35)
+        .accessibilityLabel(pictureInPicture.isActive ? "关闭画中画" : pictureInPicture.isStarting ? "取消开启画中画" : "开启画中画")
+        .accessibilityHint(pictureInPicture.status)
+    }
+
     private func footer(landscape: Bool) -> some View {
         VStack(spacing: landscape ? 8 : 16) {
             HStack(spacing: 10) {
@@ -172,23 +192,8 @@ struct ContentView: View {
                             .background(.black.opacity(0.5), in: Capsule())
                     }.disabled(!recorder.canConfigure)
                 }
-                if recorder.settings.captureMode == .video {
-                    VStack(spacing: 3) {
-                        Button {
-                            if pictureInPicture.isActive || pictureInPicture.isStarting { pictureInPicture.stop() }
-                            else { setBlackScreen(false); pictureInPicture.start() }
-                        } label: {
-                            Label(pictureInPicture.isActive ? "关闭画中画" : pictureInPicture.isStarting ? "取消开启" : "画中画",
-                                  systemImage: pictureInPicture.isActive ? "pip.exit" : "pip.enter")
-                                .font(.subheadline).padding(.horizontal, 14).frame(minHeight: 40)
-                                .background(.black.opacity(0.5), in: Capsule())
-                        }
-                        .disabled(!pictureInPicture.canStart && !pictureInPicture.isActive && !pictureInPicture.isStarting)
-                        Text(pictureInPicture.status).font(.caption2).foregroundStyle(.white.opacity(0.7))
-                            .lineLimit(2).multilineTextAlignment(.center).frame(maxWidth: 160)
-                    }
-                }
             }
+            VStack(spacing: 3) {
             HStack(spacing: 10) {
                 ForEach(recorder.zoomStops, id: \.self) { value in
                     Button { recorder.setZoom(value) } label: {
@@ -205,7 +210,13 @@ struct ContentView: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.white.opacity(0.7))
                     .accessibilityLabel("当前倍率 \(Double(recorder.zoom), specifier: "%.1f") 倍")
-                if recorder.settings.captureMode != .video { livePhotoButton }
+                if recorder.settings.captureMode == .video { pictureInPictureButton }
+                else { livePhotoButton }
+            }
+            if recorder.settings.captureMode == .video {
+                Text(pictureInPicture.status).font(.caption2).foregroundStyle(.white.opacity(0.7))
+                    .lineLimit(2).multilineTextAlignment(.center)
+            }
             }
             HStack(spacing: 24) {
                 cameraButton(symbol: "rectangle.fill", title: "黑屏", enabled: recorder.phase == .recording) {

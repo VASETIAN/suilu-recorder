@@ -112,7 +112,7 @@ struct SettingsView: View {
                 }
 
                 Section("关于随录") {
-                    LabeledContent("版本", value: "2.2.0")
+                    LabeledContent("版本", value: "2.2.1")
                     Text("个人录像工具 · 使用 Apple AVFoundation 与 PhotoKit。照片为 JPEG，视频为 MOV，Live Photo 保留配对的照片与动态片段。2× 在部分设备上属于数字变焦；0.5× 仅在当前摄像头和格式支持时显示。")
                         .font(.caption).foregroundStyle(.secondary)
                     Text("录像方向在开始时确定。录制中旋转设备会调整预览和操作界面，文件保持开始时的方向。横屏录像请先横放设备再开始。")
