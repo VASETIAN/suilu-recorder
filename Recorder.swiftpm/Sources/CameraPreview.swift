@@ -137,7 +137,7 @@ final class CapturePreviewView: UIView, UIGestureRecognizerDelegate {
         onOrientation?(interface)
     }
 
-    func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
+    override func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
         if gesture === frontPan {
             return dualCapture && gesturesEnabled && frontPreviewLayer.frame.contains(gesture.location(in: self))
         }
