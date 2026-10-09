@@ -43,6 +43,7 @@ app.setActivationPolicy(.accessory)
 final class LayoutCheck: NSObject, WKNavigationDelegate {
     let widths = [320, 430, 768]
     var index = 0
+    var searchResults = false
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 430, height: 830),
                           styleMask: [.borderless], backing: .buffered, defer: false)
     let view: WKWebView
@@ -60,7 +61,9 @@ final class LayoutCheck: NSObject, WKNavigationDelegate {
         let size = NSSize(width: widths[index], height: 830)
         window.setContentSize(size)
         view.setFrameSize(size)
-        view.loadHTMLString(fixture, baseURL: URL(string: "https://www.xiaoheihe.cn/app/bbs/home"))
+        let html = searchResults ? fixture.replacingOccurrences(of: "page-bbs-community", with: "page-bbs-list")
+            .replacingOccurrences(of: "bbs-community__search-module", with: "search-wrapper") : fixture
+        view.loadHTMLString(html, baseURL: URL(string: "https://www.xiaoheihe.cn/app/bbs/home"))
     }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         check(scrolled: false)
@@ -68,7 +71,7 @@ final class LayoutCheck: NSObject, WKNavigationDelegate {
     func check(scrolled: Bool) {
         let query = """
         (() => {
-            const page = document.querySelector('#page-bbs-community'), list = document.querySelector('.list');
+            const page = document.querySelector('#page-bbs-community, #page-bbs-list'), list = document.querySelector('.list');
             const topic = document.querySelector('.bbs-home__topic-item');
             const r = topic.getBoundingClientRect(), hit = document.elementFromPoint(r.x + 8, r.y + 8);
             return {
@@ -78,6 +81,7 @@ final class LayoutCheck: NSObject, WKNavigationDelegate {
                 listBottomMask: getComputedStyle(list, '::after').display,
                 width: document.documentElement.clientWidth,
                 scrollWidth: document.documentElement.scrollWidth,
+                searchHidden: getComputedStyle(document.querySelector('.bbs-community__search-module, .search-wrapper')).display === 'none',
                 firstPostY: document.querySelector('.bbs-home__content-item').getBoundingClientRect().y,
                 topicCanBeTapped: hit?.closest('.bbs-home__topic-item') === topic,
                 imagesFit: Array.from(document.querySelectorAll('.bbs-content__imgs-wrapper')).every(w => {
@@ -97,7 +101,8 @@ final class LayoutCheck: NSObject, WKNavigationDelegate {
             guard error == nil, let values = result as? [String: Any],
                   let width = values["width"] as? Int, let scrollWidth = values["scrollWidth"] as? Int,
                   ["pageMask", "bottomMask", "listMask", "listBottomMask"].allSatisfy({ values[$0] as? String == "none" }),
-                  scrollWidth <= width + 1, values["imagesFit"] as? Bool == true else { self.fail("Masks, stretched/overlapping images or overflow: \(String(describing: result)), \(String(describing: error))"); return }
+                  scrollWidth <= width + 1, values["imagesFit"] as? Bool == true,
+                  values["searchHidden"] as? Bool == true else { self.fail("Masks, duplicate search, stretched/overlapping images or overflow: \(String(describing: result)), \(String(describing: error))"); return }
             if !scrolled {
                 guard values["topicCanBeTapped"] as? Bool == true,
                       let y = values["firstPostY"] as? Double, y < 120 else { self.fail("Top content is covered: \(values)"); return }
@@ -106,9 +111,12 @@ final class LayoutCheck: NSObject, WKNavigationDelegate {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.check(scrolled: true) }
                 }
             } else {
-                print("PASS: production WebKit adapter at \(self.widths[self.index])px keeps 1/2/3 tall-image thumbnails bounded and separated, categories tappable and avoids masks/overflow before/after scrolling")
+                print("PASS: production WebKit adapter at \(self.widths[self.index])px (\(self.searchResults ? "search results" : "community")) keeps 1/2/3 tall-image thumbnails bounded and separated, hides duplicate search, keeps categories tappable and avoids masks/overflow before/after scrolling")
                 self.index += 1
-                if self.index == self.widths.count { exit(0) }
+                if self.index == self.widths.count {
+                    if self.searchResults { exit(0) }
+                    self.searchResults = true; self.index = 0
+                }
                 self.run()
             }
         }

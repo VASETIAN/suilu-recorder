@@ -77,6 +77,32 @@ enum RecorderInterface: String, Codable, CaseIterable, Identifiable, Sendable {
     var title: String { self == .camera ? "相机模式" : "浏览模式" }
 }
 
+enum BrowserSection: String, CaseIterable, Identifiable {
+    case community, videos, browser
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .community: return "社区"
+        case .videos: return "视频"
+        case .browser: return "浏览器"
+        }
+    }
+    var searchPrompt: String {
+        switch self {
+        case .community: return "搜索小黑盒帖子"
+        case .videos: return "搜索抖音内容"
+        case .browser: return "搜索或输入网址"
+        }
+    }
+    var home: URL? {
+        switch self {
+        case .community: return BrowserAddress.community
+        case .videos: return BrowserAddress.videos
+        case .browser: return nil
+        }
+    }
+}
+
 enum BrowserAddress {
     static let community = URL(string: "https://www.xiaoheihe.cn/app/bbs/home")!
     static func prefersDesktop(_ url: URL) -> Bool {
@@ -84,6 +110,27 @@ enum BrowserAddress {
         return host == "douyin.com" || host.hasSuffix(".douyin.com")
     }
     static let videos = URL(string: "https://www.douyin.com/?recommend=1&from_nav=1")!
+    static func isCommunity(_ url: URL) -> Bool {
+        ["www.xiaoheihe.cn", "xiaoheihe.cn"].contains(url.host?.lowercased() ?? "")
+    }
+    static func search(_ input: String, in section: BrowserSection) -> URL? {
+        let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        switch section {
+        case .community:
+            var url = URLComponents(string: "https://www.xiaoheihe.cn/app/search/list")!
+            url.queryItems = [URLQueryItem(name: "q", value: text), URLQueryItem(name: "search_type", value: "link")]
+            return url.url
+        case .videos:
+            let allowed = CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "/%?#"))
+            guard let keyword = text.addingPercentEncoding(withAllowedCharacters: allowed) else { return nil }
+            var url = URLComponents(string: "https://www.douyin.com")!
+            url.percentEncodedPath = "/search/" + keyword
+            url.queryItems = [URLQueryItem(name: "type", value: "general")]
+            return url.url
+        case .browser: return destination(text)
+        }
+    }
     static func allows(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(), ["https", "http"].contains(scheme),
               let host = url.host, !host.isEmpty, url.user == nil, url.password == nil else { return false }

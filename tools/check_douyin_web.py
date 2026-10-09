@@ -65,7 +65,8 @@ def build(output: Path):
         const panel=document.querySelector('#douyin_login_comp_flat_panel'), p=panel.getBoundingClientRect();
         const close=document.querySelector('#close-modal').getBoundingClientRect(), field=document.querySelector('#login-field').getBoundingClientRect();
         const loginFits=p.left>=0 && p.right<=innerWidth && close.right<=p.right && field.left>=p.left && field.right<=p.right && panel.scrollWidth<=panel.clientWidth+1;
-        return {ok:fits && loginFits && nextCount===1 && prevCount===1 && navigator.userAgent.includes('Macintosh') && !navigator.userAgent.includes('iPhone'),
+        const searchHidden=getComputedStyle(document.querySelector('#douyin-header')).display === 'none';
+        return {ok:fits && loginFits && searchHidden && nextCount===1 && prevCount===1 && navigator.userAgent.includes('Macintosh') && !navigator.userAgent.includes('iPhone'),
                 fits,loginFits,nextCount,prevCount,width:innerWidth,scrollWidth:document.documentElement.scrollWidth};
     })()'''
     swift = r'''

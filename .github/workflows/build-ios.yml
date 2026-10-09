@@ -43,6 +43,18 @@ jobs:
             2>&1 | tee build/xcodebuild.log
       - name: Package actual arm64 device build
         run: python3 tools/package_ipa.py
+      - name: Render production browser UI in iOS Simulator
+        run: python3 tools/render_browser_ui.py
+      - name: Upload native UI screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Browser-native-UI
+          path: |
+            build/ui-preview/*.png
+            build/ui-preview/verification.json
+          if-no-files-found: ignore
+          retention-days: 3
       - name: Upload unsigned IPA and verification
         uses: actions/upload-artifact@v4
         with:

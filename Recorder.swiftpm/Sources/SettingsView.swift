@@ -53,14 +53,14 @@ struct SettingsView: View {
                         Button("开始录像并返回浏览", action: startBrowsingRecording)
                             .disabled(!recorder.canRecord)
                     }
-                    Text("浏览主页只显示帖子和搜索，底部‘设置’可随时回到这里。开始、计时和停止都在设置中；停止时保存到内置图库。录像需你手动开启，系统相机和麦克风隐私指示正常显示。")
+                    Text("浏览页面右上角的‘… → 设置’可随时回到这里。开始、计时和停止都在设置中；停止时保存到内置图库。录像需你手动开启，系统相机和麦克风隐私指示正常显示。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("界面形态") {
                     Picker("打开方式", selection: $draft.interfaceMode) {
                         ForEach(RecorderInterface.allCases) { Text($0.title).tag($0) }
                     }
-                    Text("浏览模式打开按手机宽度显示的小黑盒官方社区网页，可输入网址或全网搜索。浏览发生在本 App 内，切换到其他 App 后仍按原规则停止或分段恢复。")
+                    Text("社区搜索小黑盒帖子，视频搜索抖音内容；底部‘浏览器’可输入网址或全网搜索。三个页面分别保留浏览位置和历史。浏览发生在本 App 内，切换到其他 App 后仍按原规则停止或分段恢复。")
                         .font(.caption).foregroundStyle(.secondary)
                 }.disabled(!recorder.canConfigure)
                 if recorder.settings.interfaceMode == .browser {
