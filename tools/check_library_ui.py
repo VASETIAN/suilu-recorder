@@ -106,7 +106,9 @@ final class LibraryUITests: XCTestCase {
         app.buttons["library-delete"].tap()
         XCTAssertTrue(app.buttons["删除 2 项"].waitForExistence(timeout:5))
         attach("library-delete-confirmation")
-        app.buttons["取消"].tap(); count(2)
+        if app.buttons["取消"].exists { app.buttons["取消"].tap() }
+        else { app.navigationBars.firstMatch.coordinate(withNormalizedOffset:CGVector(dx:0.5,dy:0.5)).tap() }
+        count(2)
         XCTAssertTrue(item(101).exists && item(103).exists && item(102).exists && item(104).exists)
         app.buttons["library-delete"].tap()
         app.buttons["删除 2 项"].tap()
@@ -185,6 +187,9 @@ def run(device):
     completed = subprocess.run(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
     (OUT/'xcodebuild.log').write_text(completed.stdout)
     if completed.returncode: print(completed.stdout[-24000:])
+    attachments = UI_OUT / 'library-attachments'
+    if result.exists():
+        subprocess.run(['xcrun','xcresulttool','export','attachments','--path',str(result),'--output-path',str(attachments)],check=True)
     completed.check_returncode()
     container = Path(subprocess.check_output(['xcrun','simctl','get_app_container',device,APP_ID,'data'],text=True).strip()).resolve()
     fixture = json.loads((container/'Documents/library-fixture.json').read_text())
@@ -196,8 +201,6 @@ def run(device):
             assert path.is_relative_to(container)
             if item['id'] in deleted: assert not path.exists(), path
             else: assert hashlib.sha256(path.read_bytes()).hexdigest() == resource['sha256'], path
-    attachments = UI_OUT / 'library-attachments'
-    subprocess.run(['xcrun','xcresulttool','export','attachments','--path',str(result),'--output-path',str(attachments)],check=True)
     assert len([p for p in attachments.rglob('*') if p.suffix.lower() in ['.png','.jpg','.jpeg']]) >= 4, 'Expected native selection/export/confirmation/after-delete screenshots'
     (UI_OUT/'library-verification.json').write_text(json.dumps({'production_gallery_controller_unchanged':True,
         'fixture_app_id':APP_ID,'physical_device_test':False,'native_ui_test':'passed',
