@@ -70,7 +70,7 @@ def generate():
         objects[key] = {'isa': isa, **values}
         return key
     sources = sorted((PACKAGE / 'Sources').glob('*.swift'))
-    assert len(sources) == 14 and sum('@main' in p.read_text(encoding='utf-8') for p in sources) == 1
+    assert len(sources) == 15 and sum('@main' in p.read_text(encoding='utf-8') for p in sources) == 1
     refs, files = [], []
     for path in sources:
         ref = add('source:' + path.name, 'PBXFileReference', lastKnownFileType='sourcecode.swift',

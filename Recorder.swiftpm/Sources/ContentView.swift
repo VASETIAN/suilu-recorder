@@ -25,7 +25,7 @@ struct ContentView: View {
                               onBlackScreen: { setBlackScreen(true) })
                     .ignoresSafeArea().accessibilityHidden(isBlack || recorder.settings.interfaceMode == .browser)
                 if recorder.settings.interfaceMode == .camera {
-                LinearGradient(colors: [.black.opacity(0.75), .clear, .clear, .black.opacity(0.85)],
+                LinearGradient(colors: [.black.opacity(0.4), .clear, .clear, .black.opacity(0.55)],
                                startPoint: .top, endPoint: .bottom)
                     .ignoresSafeArea().allowsHitTesting(false)
                 VStack(spacing: landscape ? 8 : 14) {
@@ -123,56 +123,58 @@ struct ContentView: View {
     }
 
     private var header: some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
-                    if recorder.phase == .recording {
-                        Circle().fill(.red).frame(width: 8, height: 8)
-                        Text(recorder.elapsedLabel).monospacedDigit().font(.headline)
-                    } else {
-                        Text("畅游").font(.headline)
+        recorderGlassGroup {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        if recorder.phase == .recording {
+                            Circle().fill(.red).frame(width: 8, height: 8)
+                            Text(recorder.elapsedLabel).monospacedDigit().font(.headline)
+                        } else {
+                            Text("畅游").font(.headline)
+                        }
                     }
+                    Text(recorder.settings.captureMode == .video ? recorder.settings.mode.title : recorder.settings.captureMode.title)
+                        .font(.caption.weight(.medium)).foregroundStyle(.white.opacity(0.8)).lineLimit(1)
+                    Text(recorder.activeLensLabel).font(.caption2).foregroundStyle(.white.opacity(0.65))
+                    Text("剩余 \(RecorderFiles.sizeLabel(recorder.availableSpace))")
+                        .font(.caption).foregroundStyle(.white.opacity(0.75))
+                    if recorder.settings.captureMode == .video {
+                        Text("预计可录：\(recorder.recordingTimeEstimate(for: recorder.settings))")
+                            .font(.caption2).foregroundStyle(.white.opacity(0.75)).monospacedDigit()
+                    }
+                    if recorder.settings.includeLocation {
+                        Label(location.status, systemImage: "location.fill").font(.caption2).foregroundStyle(.white.opacity(0.7))
+                            .lineLimit(1)
+                    }
+                }.padding(12).recorderGlass(in: RoundedRectangle(cornerRadius: 20))
+                Spacer(minLength: 8)
+                Button { recorder.setInterfaceMode(.browser) } label: {
+                    Image(systemName: "safari").font(.title3)
+                        .frame(width: 44, height: 44).recorderGlass(in: Circle(), interactive: true)
                 }
-                Text(recorder.settings.captureMode == .video ? recorder.settings.mode.title : recorder.settings.captureMode.title)
-                    .font(.caption.weight(.medium)).foregroundStyle(.white.opacity(0.8)).lineLimit(1)
-                Text(recorder.activeLensLabel).font(.caption2).foregroundStyle(.white.opacity(0.65))
-                Text("剩余 \(RecorderFiles.sizeLabel(recorder.availableSpace))")
-                    .font(.caption).foregroundStyle(.white.opacity(0.75))
-                if recorder.settings.captureMode == .video {
-                    Text("预计可录：\(recorder.recordingTimeEstimate(for: recorder.settings))")
-                        .font(.caption2).foregroundStyle(.white.opacity(0.75)).monospacedDigit()
+                .disabled(recorder.isConfiguring || (recorder.phase != .idle && recorder.phase != .recording))
+                .accessibilityLabel("打开浏览模式")
+                if recorder.settings.captureMode != .video { livePhotoButton }
+                else if recorder.dualCaptureSupported { dualCaptureButton }
+                Button(action: recorder.toggleTorch) {
+                    Image(systemName: recorder.torchOn ? "flashlight.on.fill" : "flashlight.off.fill")
+                        .font(.title3)
+                        .foregroundStyle(recorder.torchOn ? .yellow : .white)
+                        .frame(width: 44, height: 44)
+                        .recorderGlass(in: Circle(), interactive: true)
                 }
-                if recorder.settings.includeLocation {
-                    Label(location.status, systemImage: "location.fill").font(.caption2).foregroundStyle(.white.opacity(0.7))
-                        .lineLimit(1)
+                .disabled(!recorder.hasTorch || !recorder.isReady)
+                .opacity(recorder.hasTorch ? 1 : 0.35)
+                .accessibilityLabel(recorder.torchOn ? "关闭补光灯" : "开启补光灯")
+                Button { pendingResumeID = nil; showSettings = true } label: {
+                    Image(systemName: "gearshape.fill").font(.title3)
+                        .frame(width: 44, height: 44)
+                        .recorderGlass(in: Circle(), interactive: true)
                 }
+                .disabled(recorder.phase.blocksConfiguration || recorder.isConfiguring)
+                .accessibilityLabel("拍摄设置")
             }
-            Spacer(minLength: 8)
-            Button { recorder.setInterfaceMode(.browser) } label: {
-                Image(systemName: "safari").font(.title3)
-                    .frame(width: 44, height: 44).background(.black.opacity(0.35), in: Circle())
-            }
-            .disabled(recorder.isConfiguring || (recorder.phase != .idle && recorder.phase != .recording))
-            .accessibilityLabel("打开浏览模式")
-            if recorder.settings.captureMode != .video { livePhotoButton }
-            else if recorder.dualCaptureSupported { dualCaptureButton }
-            Button(action: recorder.toggleTorch) {
-                Image(systemName: recorder.torchOn ? "flashlight.on.fill" : "flashlight.off.fill")
-                    .font(.title3)
-                    .foregroundStyle(recorder.torchOn ? .yellow : .white)
-                    .frame(width: 44, height: 44)
-                    .background(.black.opacity(0.35), in: Circle())
-            }
-            .disabled(!recorder.hasTorch || !recorder.isReady)
-            .opacity(recorder.hasTorch ? 1 : 0.35)
-            .accessibilityLabel(recorder.torchOn ? "关闭补光灯" : "开启补光灯")
-            Button { pendingResumeID = nil; showSettings = true } label: {
-                Image(systemName: "gearshape.fill").font(.title3)
-                    .frame(width: 44, height: 44)
-                    .background(.black.opacity(0.35), in: Circle())
-            }
-            .disabled(recorder.phase.blocksConfiguration || recorder.isConfiguring)
-            .accessibilityLabel("拍摄设置")
         }
         .foregroundStyle(.white)
     }
@@ -194,7 +196,7 @@ struct ContentView: View {
             }
         }
         .padding(22)
-        .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 20))
+        .recorderGlass(in: RoundedRectangle(cornerRadius: 20))
         .foregroundStyle(.white)
     }
 
@@ -207,7 +209,7 @@ struct ContentView: View {
             }
             .foregroundStyle(enabled ? .yellow : .white)
             .frame(width: 44, height: 44)
-            .background(.black.opacity(0.35), in: Circle())
+            .recorderGlass(in: Circle(), interactive: true)
         }
         .disabled(!recorder.canConfigure || !recorder.isReady || !recorder.livePhotoSupported)
         .opacity(recorder.livePhotoSupported ? 1 : 0.35)
@@ -222,7 +224,7 @@ struct ContentView: View {
                 Text("双摄").font(.system(size: 9, weight: .semibold))
             }
             .foregroundStyle(recorder.settings.dualCapture ? .yellow : .white)
-            .frame(width: 44, height: 44).background(.black.opacity(0.35), in: Circle())
+            .frame(width: 44, height: 44).recorderGlass(in: Circle(), interactive: true)
         }
         .disabled(!recorder.canConfigure)
         .accessibilityLabel("前后同步录像")
@@ -230,49 +232,50 @@ struct ContentView: View {
     }
 
     private func footer(landscape: Bool) -> some View {
-        VStack(spacing: landscape ? 8 : 16) {
-            HStack(spacing: 10) {
-                ForEach([CaptureMode.video, .photo]) { mode in
-                    Button { recorder.setCaptureMode(mode) } label: {
-                        Text(mode.title).font(.subheadline.weight(.semibold))
-                            .foregroundStyle((recorder.settings.captureMode == .video) == (mode == .video) ? .yellow : .white)
-                            .padding(.horizontal, 14).frame(minHeight: 40)
-                            .background(.black.opacity(0.5), in: Capsule())
-                    }.disabled(!recorder.canConfigure)
-                }
-            }
-            HStack(spacing: 10) {
-                ForEach(recorder.zoomStops, id: \.self) { value in
-                    Button { recorder.selectZoom(value) } label: {
-                        Text(zoomLabel(value))
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(abs(recorder.zoom - value) < 0.08 ? .yellow : .white)
-                            .frame(minWidth: 46, minHeight: 44)
-                            .background(.black.opacity(0.5), in: Capsule())
+        recorderGlassGroup {
+            VStack(spacing: landscape ? 8 : 16) {
+                HStack(spacing: 10) {
+                    ForEach([CaptureMode.video, .photo]) { mode in
+                        Button { recorder.setCaptureMode(mode) } label: {
+                            Text(mode.title).font(.subheadline.weight(.semibold))
+                                .foregroundStyle((recorder.settings.captureMode == .video) == (mode == .video) ? .yellow : .white)
+                                .padding(.horizontal, 14).frame(minHeight: 40)
+                        }.disabled(!recorder.canConfigure)
                     }
-                    .disabled(!recorder.isReady || recorder.isConfiguring)
-                    .accessibilityLabel("变焦 \(zoomLabel(value))")
+                }.padding(4).recorderGlass(in: Capsule(), interactive: true)
+                HStack(spacing: 10) {
+                    ForEach(recorder.zoomStops, id: \.self) { value in
+                        Button { recorder.selectZoom(value) } label: {
+                            Text(zoomLabel(value))
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(abs(recorder.zoom - value) < 0.08 ? .yellow : .white)
+                                .frame(minWidth: 46, minHeight: 44)
+                        }
+                        .disabled(!recorder.isReady || recorder.isConfiguring)
+                        .accessibilityLabel("变焦 \(zoomLabel(value))")
+                    }
                 }
-            }
-            .frame(height: 44)
-            .accessibilityValue("当前倍率 \(Double(recorder.zoom), specifier: "%.1f") 倍")
-            HStack(spacing: 24) {
-                cameraButton(symbol: "photo.on.rectangle.angled", title: "相册", enabled: recorder.canConfigure) {
-                    pendingResumeID = nil
-                    showLibrary = true
+                .frame(height: 44)
+                .padding(4).recorderGlass(in: Capsule(), interactive: true)
+                .accessibilityValue("当前倍率 \(Double(recorder.zoom), specifier: "%.1f") 倍")
+                HStack(spacing: 24) {
+                    cameraButton(symbol: "photo.on.rectangle.angled", title: "相册", enabled: recorder.canConfigure) {
+                        pendingResumeID = nil
+                        showLibrary = true
+                    }
+                    Spacer(minLength: 0)
+                    captureButton
+                    Spacer(minLength: 0)
+                    cameraButton(symbol: "arrow.triangle.2.circlepath.camera", title: "翻转",
+                                 enabled: recorder.canConfigure && recorder.isReady && !recorder.settings.dualCapture, action: recorder.switchCamera)
                 }
-                Spacer(minLength: 0)
-                captureButton
-                Spacer(minLength: 0)
-                cameraButton(symbol: "arrow.triangle.2.circlepath.camera", title: "翻转",
-                             enabled: recorder.canConfigure && recorder.isReady && !recorder.settings.dualCapture, action: recorder.switchCamera)
+                .frame(maxWidth: 400)
+                Text(recorder.phase == .recording ? "\(recorder.settings.microphoneEnabled ? "有声" : "无声")录像 · \(recorder.settings.recovery.title)恢复黑屏"
+                     : recorder.phase.blocksConfiguration ? recorder.phase.title : recorder.status)
+                    .font(.caption).foregroundStyle(.white.opacity(0.8))
+                    .multilineTextAlignment(.center).lineLimit(2)
+                    .frame(height: 32)
             }
-            .frame(maxWidth: 400)
-            Text(recorder.phase == .recording ? "\(recorder.settings.microphoneEnabled ? "有声" : "无声")录像 · \(recorder.settings.recovery.title)恢复黑屏"
-                 : recorder.phase.blocksConfiguration ? recorder.phase.title : recorder.status)
-                .font(.caption).foregroundStyle(.white.opacity(0.8))
-                .multilineTextAlignment(.center).lineLimit(2)
-                .frame(height: 32)
         }
         .foregroundStyle(.white)
     }
@@ -289,6 +292,7 @@ struct ContentView: View {
                     Circle().fill(recorder.settings.captureMode == .video ? .red : .white).frame(width: 62, height: 62)
                 }
             }
+            .frame(width: 84, height: 84).recorderGlass(in: Circle(), interactive: true)
         }
         .disabled(!(recorder.canRecord || recorder.phase == .recording))
         .opacity(recorder.isReady || recorder.phase.blocksConfiguration ? 1 : 0.45)
@@ -346,7 +350,7 @@ struct ContentView: View {
             VStack(spacing: 5) {
                 Image(systemName: symbol).font(.title2).frame(height: 28)
                 Text(title).font(.caption)
-            }.frame(width: 64, height: 64)
+            }.frame(width: 64, height: 64).recorderGlass(in: Circle(), interactive: true)
         }
         .disabled(!enabled).opacity(enabled ? 1 : 0.35)
         .accessibilityLabel(title)

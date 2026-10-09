@@ -86,7 +86,8 @@ struct LibraryView: View {
                         }
                         Text("系统照片批量导出跳过已导出项；原件与信息可在共享页存到文件。")
                             .font(.caption2).foregroundStyle(.secondary)
-                    }.padding().background(.ultraThinMaterial)
+                    }.padding().recorderGlass(in: RoundedRectangle(cornerRadius: 24))
+                        .padding(.horizontal, 16).padding(.bottom, 8)
                 }
             }
             .sheet(item: $recorder.shareExport, onDismiss: recorder.finishSharing) { export in ShareMediaView(urls: export.urls) }

@@ -280,9 +280,20 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
 @MainActor
 private struct RecorderWebPage: UIViewRepresentable {
     let browser: RecorderBrowser
+    let insets: UIEdgeInsets
     func makeUIView(context: Context) -> UIView { UIView() }
     func updateUIView(_ view: UIView, context: Context) {
         let page = browser.webView
+        let scroll = page.scrollView
+        scroll.contentInsetAdjustmentBehavior = .never
+        if scroll.contentInset != insets {
+            let offset = scroll.contentOffset
+            let previous = scroll.contentInset
+            scroll.contentInset = insets
+            scroll.verticalScrollIndicatorInsets = insets
+            // Preserve the visible document position when bars or orientation change.
+            scroll.setContentOffset(CGPoint(x: offset.x, y: offset.y + previous.top - insets.top), animated: false)
+        }
         guard page.superview !== view else { return }
         view.subviews.forEach { $0.removeFromSuperview() }
         page.translatesAutoresizingMaskIntoConstraints = false
@@ -296,6 +307,13 @@ private struct RecorderWebPage: UIViewRepresentable {
     }
 }
 
+private struct BrowserChromeHeight: PreferenceKey {
+    static var defaultValue: [String: CGFloat] = [:]
+    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, latest in latest })
+    }
+}
+
 @MainActor
 struct BrowserView: View {
     @ObservedObject var browser: RecorderBrowser
@@ -303,19 +321,13 @@ struct BrowserView: View {
     @State private var searchText = ""
     @State private var searches: [BrowserSection: String] = [:]
     @FocusState private var searchFocused: Bool
+    @State private var chromeHeights: [String: CGFloat] = ["top": 64, "bottom": 68]
+    @Namespace private var tabSelection
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        VStack(spacing: 0) {
-            topBar
-            Divider()
-            if let notice = browser.notice {
-                HStack {
-                    Text(notice).font(.caption)
-                    Spacer()
-                    Button("关闭") { browser.notice = nil }.frame(minHeight: 44)
-                }.padding(.horizontal, 16).background(Color(uiColor: .secondarySystemBackground))
-            }
-            ZStack(alignment: .top) {
+        GeometryReader { geometry in
+            ZStack {
                 if browser.section == .browser && browser.currentURL == nil && !browser.loading {
                     VStack(spacing: 16) {
                         Image(systemName: "safari").font(.system(size: 46, weight: .light)).foregroundStyle(.secondary)
@@ -327,39 +339,40 @@ struct BrowserView: View {
                         }.buttonStyle(.bordered).padding(.top, 8)
                     }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    RecorderWebPage(browser: browser).frame(maxWidth: .infinity, maxHeight: .infinity)
+                    RecorderWebPage(browser: browser, insets: UIEdgeInsets(
+                        top: geometry.safeAreaInsets.top + chromeHeights["top", default: 64], left: 0,
+                        bottom: geometry.safeAreaInsets.bottom + chromeHeights["bottom", default: 68], right: 0))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .ignoresSafeArea(.container, edges: [.top, .bottom])
                 }
-                if browser.loading { ProgressView().progressViewStyle(.linear).tint(.secondary).frame(height: 2) }
+                VStack(spacing: 0) {
+                    VStack(spacing: 8) {
+                        topBar
+                        if let notice = browser.notice {
+                            HStack {
+                                Text(notice).font(.caption)
+                                Spacer()
+                                Button("关闭") { browser.notice = nil }.frame(minHeight: 44)
+                            }.padding(.horizontal, 16).padding(.vertical, 4)
+                                .recorderGlass(in: RoundedRectangle(cornerRadius: 20))
+                        }
+                    }.padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 8)
+                        .frame(maxWidth: 900)
+                        .background(GeometryReader { size in
+                            Color.clear.preference(key: BrowserChromeHeight.self, value: ["top": size.size.height])
+                        })
+                    Spacer(minLength: 0)
+                    bottomBar.padding(.horizontal, 12).padding(.bottom, 8)
+                        .frame(maxWidth: 500)
+                        .background(GeometryReader { size in
+                            Color.clear.preference(key: BrowserChromeHeight.self, value: ["bottom": size.size.height])
+                        })
+                }
             }
-            if browser.section == .browser {
-                Divider()
-                HStack {
-                    Button(action: browser.back) { Image(systemName: "chevron.left").frame(width: 44, height: 44) }
-                        .foregroundStyle(browser.canGoBack ? Color.primary : Color.secondary)
-                        .disabled(!browser.canGoBack).accessibilityLabel("返回上一页")
-                    Spacer()
-                    Button(action: browser.forward) { Image(systemName: "chevron.right").frame(width: 44, height: 44) }
-                        .foregroundStyle(browser.canGoForward ? Color.primary : Color.secondary)
-                        .disabled(!browser.canGoForward).accessibilityLabel("前进一页")
-                    Spacer()
-                    Text(browser.currentURL?.host ?? "新页面").font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    Spacer()
-                    Button(action: browser.reloadOrStop) {
-                        Image(systemName: browser.loading ? "xmark" : "arrow.clockwise").frame(width: 44, height: 44)
-                    }.foregroundStyle(browser.currentURL == nil ? Color.secondary : Color.primary)
-                        .disabled(browser.currentURL == nil).accessibilityLabel(browser.loading ? "停止加载" : "刷新网页")
-                }.font(.system(size: 18)).padding(.horizontal, 12)
-            }
-            Divider()
-            HStack(spacing: 0) {
-                tab(.community, symbol: "square.grid.2x2", selectedSymbol: "square.grid.2x2.fill")
-                tab(.videos, symbol: "play.rectangle", selectedSymbol: "play.rectangle.fill")
-                tab(.browser, symbol: "safari", selectedSymbol: "safari.fill")
-            }.padding(.vertical, 4)
+            .onPreferenceChange(BrowserChromeHeight.self) { chromeHeights = $0 }
         }
         .background(Color(uiColor: .systemBackground).ignoresSafeArea()).foregroundStyle(Color.primary).tint(Color.primary)
         .preferredColorScheme(browser.isVideoPage ? .dark : .light)
-        .ignoresSafeArea(.keyboard, edges: .bottom)
         .onAppear {
             browser.startIfNeeded()
             if browser.section == .browser { searchText = browser.currentURL?.absoluteString ?? "" }
@@ -370,6 +383,37 @@ struct BrowserView: View {
         .onDisappear { browser.pauseMedia() }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
             browser.pauseMedia()
+        }
+    }
+
+    private var bottomBar: some View {
+        recorderGlassGroup {
+            VStack(spacing: 8) {
+                if browser.section == .browser {
+                    HStack {
+                        Button(action: browser.back) { Image(systemName: "chevron.left").frame(width: 44, height: 44) }
+                            .foregroundStyle(browser.canGoBack ? Color.primary : Color.secondary)
+                            .disabled(!browser.canGoBack).accessibilityLabel("返回上一页")
+                        Spacer()
+                        Button(action: browser.forward) { Image(systemName: "chevron.right").frame(width: 44, height: 44) }
+                            .foregroundStyle(browser.canGoForward ? Color.primary : Color.secondary)
+                            .disabled(!browser.canGoForward).accessibilityLabel("前进一页")
+                        Spacer()
+                        Text(browser.currentURL?.host ?? "新页面").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        Spacer()
+                        Button(action: browser.reloadOrStop) {
+                            Image(systemName: browser.loading ? "xmark" : "arrow.clockwise").frame(width: 44, height: 44)
+                        }.foregroundStyle(browser.currentURL == nil ? Color.secondary : Color.primary)
+                            .disabled(browser.currentURL == nil).accessibilityLabel(browser.loading ? "停止加载" : "刷新网页")
+                    }.font(.system(size: 18)).padding(.horizontal, 12)
+                        .recorderGlass(in: Capsule(), interactive: true)
+                }
+                HStack(spacing: 0) {
+                    tab(.community, symbol: "square.grid.2x2", selectedSymbol: "square.grid.2x2.fill")
+                    tab(.videos, symbol: "play.rectangle", selectedSymbol: "play.rectangle.fill")
+                    tab(.browser, symbol: "safari", selectedSymbol: "safari.fill")
+                }.padding(6).recorderGlass(in: Capsule(), interactive: true)
+            }
         }
     }
 
@@ -400,7 +444,6 @@ struct BrowserView: View {
                 }
             }
             .padding(.leading, 12).padding(.trailing, searchText.isEmpty ? 12 : 2).frame(height: 44)
-            .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
             Menu {
                 Text(browser.siteLabel)
                 Button(action: browser.back) { Label("返回上一页", systemImage: "chevron.left") }.disabled(!browser.canGoBack)
@@ -422,6 +465,13 @@ struct BrowserView: View {
             }.accessibilityLabel("更多选项")
         }.padding(.leading, browser.canGoBack && browser.section != .browser ? 6 : 16)
             .padding(.trailing, 6).padding(.vertical, 6)
+            .recorderGlass(in: Capsule(), interactive: true)
+            .overlay(alignment: .bottom) {
+                if browser.loading {
+                    ProgressView().progressViewStyle(.linear).tint(.secondary).frame(height: 2)
+                        .padding(.horizontal, 20).padding(.bottom, 2)
+                }
+            }
     }
 
     private func tab(_ section: BrowserSection, symbol: String, selectedSymbol: String) -> some View {
@@ -433,6 +483,12 @@ struct BrowserView: View {
             }
             .frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
             .foregroundStyle(selected ? Color.primary : Color.secondary)
+            .padding(.vertical, 2)
+            .background {
+                if selected {
+                    Capsule().fill(Color.primary.opacity(0.1)).matchedGeometryEffect(id: "selection", in: tabSelection)
+                }
+            }
         }.buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : [])
     }
 
@@ -440,7 +496,7 @@ struct BrowserView: View {
         guard section != browser.section else { return }
         searches[browser.section] = searchText
         searchFocused = false
-        browser.select(section)
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) { browser.select(section) }
         searchText = section == .browser ? browser.currentURL?.absoluteString ?? searches[section, default: ""]
             : searches[section, default: ""]
     }
