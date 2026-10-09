@@ -77,8 +77,11 @@ import WebKit
                     });
                     """) { _, error in
                         if let error { self.ready(["error":error.localizedDescription]); return }
-                        self.browser.webView.scrollView.setContentOffset(CGPoint(x:0,y:200), animated:false)
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.ready(value) }
+                        // Image replacement can temporarily collapse the page and reset its offset.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                            self.browser.webView.scrollView.setContentOffset(CGPoint(x:0,y:200), animated:false)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.ready(value) }
+                        }
                     }
                 } else { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.ready(value) } }
             } else if remaining > 0 {
