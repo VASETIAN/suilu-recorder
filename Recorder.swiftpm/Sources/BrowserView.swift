@@ -93,7 +93,7 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
             if (!viewport.parentNode) document.head.appendChild(viewport);
             const style = document.createElement('style');
             style.textContent = `
-                @media (max-width: 768px) {
+                @media (max-width: 1024px) {
                     html, body, #root, #dark { min-width:0!important; width:100%!important; }
                     #douyin-navigation { display:none!important; }
                     #douyin-right-container { width:100%!important; margin-left:0!important; padding-top:0!important; }
@@ -101,8 +101,11 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
                     #search-body-container, #search-content-area, #search-result-container { width:100%!important; min-width:0!important; }
                     #search-content-area { margin:0!important; padding:0 12px!important; }
                     #search-toolbar-container { position:sticky!important; top:0!important; width:100%!important; margin:0!important; padding:0!important; overflow-x:auto!important; }
-                    #slidelist.recommend-slidelist [data-e2e="slideList"] { padding-right:44px!important; }
-                    #slidelist .xgplayer-playswitch-tab { right:4px!important; }
+                    #dark:has(#slidelist.recommend-slidelist) { height:100vh!important; }
+                    #douyin-right-container:has(#slidelist.recommend-slidelist),
+                    #douyin-right-container div:has(#slidelist.recommend-slidelist) { height:100%!important; min-height:0!important; }
+                    #slidelist.recommend-slidelist [data-e2e="slideList"] { padding:0!important; min-height:0!important; }
+                    .recommend-out-switch-btn { right:8px!important; top:12px!important; bottom:auto!important; transform:none!important; z-index:2; }
                     #douyin_login_comp_flat_panel { max-width:calc(100vw - 24px)!important; max-height:90vh!important; height:auto!important; overflow:auto!important; }
                     #douyin_login_comp_flat_panel_title { max-width:calc(100% - 54px)!important; font-size:18px!important; }
                     #douyin_login_landing_flat_container { width:100%!important; flex-direction:column!important; align-items:center!important; gap:24px!important; padding:16px 12px 24px!important; }
@@ -338,6 +341,17 @@ struct BrowserView: View {
                             Button("抖音") { browser.open(BrowserAddress.videos) }
                         }.buttonStyle(.bordered).padding(.top, 8)
                     }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if browser.isVideoPage {
+                    // A viewport-sized player needs real layout space, not scroll insets behind the bars.
+                    RecorderWebPage(browser: browser, insets: .zero)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .recorderExtendedBackground()
+                        .safeAreaInset(edge: .top, spacing: 0) {
+                            Color.clear.frame(height: chromeHeights["top", default: 64])
+                        }
+                        .safeAreaInset(edge: .bottom, spacing: 0) {
+                            Color.clear.frame(height: chromeHeights["bottom", default: 68])
+                        }
                 } else {
                     RecorderWebPage(browser: browser, insets: UIEdgeInsets(
                         top: geometry.safeAreaInsets.top + chromeHeights["top", default: 64], left: 0,

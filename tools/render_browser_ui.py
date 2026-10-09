@@ -28,8 +28,10 @@ for section in ['community', 'videos']:
     if section == 'community':
         fixture = fixture.replace('Test post', '一起聊聊最近在玩的游戏')
     else:
-        fixture = fixture.replace('</style>', 'body{background:#000;color:#fff}#video-surface{display:flex;align-items:center;justify-content:center;height:80%;font:22px system-ui}</style>')
-        fixture = fixture.replace('>Video</span>', '>视频内容示例</span>').replace('>Like</button>', '>喜欢</button>')
+        fixture = fixture.replace('</style>', 'body{background:#000;color:#fff}#video-surface svg{width:100%;height:100%;object-fit:contain}#video-info{position:absolute;bottom:60px;left:16px;font:16px system-ui}</style>')
+        sample = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid meet"><defs><linearGradient id="sky"><stop stop-color="#143556"/><stop offset="1" stop-color="#557f90"/></linearGradient></defs><rect width="1600" height="900" fill="url(#sky)"/><path d="M0 680L420 260L790 680L1170 350L1600 740V900H0Z" fill="#294c5b"/><path d="M0 790L560 590L1080 780L1600 600V900H0Z" fill="#183644"/><text x="800" y="430" text-anchor="middle" fill="white" font-size="65" font-family="system-ui">视频内容示例</text></svg>'
+        fixture = fixture.replace('>Video</span>', '>'+sample+'</span>').replace('>Like</button>', '>♡</button>')
+        fixture = fixture.replace('<div class="xgplayer-controls">', '<div id="video-info">@示例作者 · 视频保留原始比例</div><div class="xgplayer-controls">')
     (BUNDLE / f'{section}.html').write_text(fixture)
 
 harness = r'''
@@ -40,13 +42,14 @@ import WebKit
     var window: UIWindow?
     let browser = RecorderBrowser()
     let scenario = CommandLine.arguments.last ?? "community"
-    var section: BrowserSection { BrowserSection(rawValue: scenario) ?? .community }
+    var section: BrowserSection { scenario.hasPrefix("videos") ? .videos : BrowserSection(rawValue: scenario) ?? .community }
     func application(_ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         browser.select(section)
         let host = UIHostingController(rootView: BrowserView(browser: browser, settings: {}))
         window = UIWindow(frame: UIScreen.main.bounds)
         window?.rootViewController = host
         window?.makeKeyAndVisible()
+        window?.windowScene?.requestGeometryUpdate(.iOS(interfaceOrientations: scenario == "videos-landscape" ? .landscapeRight : .portrait))
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
             if self.section == .browser { self.ready(["nativeStartPage": true]); return }
             let html = try! String(contentsOf: Bundle.main.url(forResource: self.section.rawValue, withExtension: "html")!)
@@ -60,14 +63,20 @@ import WebKit
         (() => {
             const ready = document.title === 'Browser UI fixture';
             const search = document.querySelector('#douyin-header, .bbs-community__search-module');
+            const feed = document.querySelector('[data-e2e="feed-active-video"]')?.getBoundingClientRect();
+            const controls = document.querySelector('.xgplayer-controls')?.getBoundingClientRect();
             return {ready, noDuplicateSearch:!!search && getComputedStyle(search).display === 'none',
                 noOverflow: document.documentElement.scrollWidth <= innerWidth + 1,
-                width:innerWidth};
+                width:innerWidth, height:innerHeight,
+                fillsWidth:!feed || (Math.abs(feed.left)<=1 && Math.abs(feed.right-innerWidth)<=1),
+                controlsFit:!controls || (controls.top>=0 && controls.bottom<=innerHeight+1),
+                controlFrame:controls ? [controls.x,controls.y,controls.width,controls.height] : []};
         })()
         """) { result, error in
             if let value = result as? [String: Any], value["ready"] as? Bool == true {
-                guard value["noDuplicateSearch"] as? Bool == true, value["noOverflow"] as? Bool == true else {
-                    self.ready(["error": "Duplicate search or horizontal overflow", "values": value]); return
+                guard value["noDuplicateSearch"] as? Bool == true, value["noOverflow"] as? Bool == true,
+                    value["fillsWidth"] as? Bool == true, value["controlsFit"] as? Bool == true else {
+                    self.ready(["error": "Duplicate search, overflow, unused width or obscured playback controls", "values": value]); return
                 }
                 if self.scenario.hasPrefix("glass-") {
                     let color = self.scenario == "glass-blue" ? "#3b82f6" : "#f97316"
@@ -104,7 +113,19 @@ import WebKit
             value["pageFrame"] = [frame.minX,frame.minY,frame.width,frame.height]
             value["scrollOffset"] = page.scrollView.contentOffset.y
             value["glassSample"] = [window.bounds.width * 0.2,window.safeAreaInsets.top + 12,window.bounds.width * 0.6,4]
-            if value["underlapsChrome"] as? Bool != true || inset.top < window.safeAreaInsets.top + 44
+            if section == .videos {
+                let safe = window.safeAreaInsets
+                value["playerBetweenBars"] = frame.minY >= safe.top + 64
+                    && frame.maxY <= window.bounds.height - safe.bottom - 68
+                    && abs(frame.width - (window.bounds.width - safe.left - safe.right)) <= 1
+                    && inset == .zero
+                if value["playerBetweenBars"] as? Bool != true {
+                    value["error"] = "Player viewport extends under native controls or does not fill the available width"
+                }
+                if (scenario == "videos-landscape") != (frame.width > frame.height) {
+                    value["error"] = "Native video viewport did not rotate to the requested orientation"
+                }
+            } else if value["underlapsChrome"] as? Bool != true || inset.top < window.safeAreaInsets.top + 44
                 || inset.bottom < window.safeAreaInsets.bottom + 44 {
                 value["error"] = "Web page does not extend behind glass, or visible content insets are missing"
             }
@@ -122,7 +143,7 @@ info = {'CFBundleExecutable': 'BrowserUIPreview', 'CFBundleIdentifier': 'com.tia
         'CFBundleName': 'Browser UI Check', 'CFBundlePackageType': 'APPL', 'CFBundleVersion': '1',
         'CFBundleShortVersionString': '1.0', 'MinimumOSVersion': '16.0', 'UIDeviceFamily': [1],
         'LSRequiresIPhoneOS': True, 'UILaunchScreen': {},
-        'UISupportedInterfaceOrientations': ['UIInterfaceOrientationPortrait']}
+        'UISupportedInterfaceOrientations': ['UIInterfaceOrientationPortrait', 'UIInterfaceOrientationLandscapeLeft', 'UIInterfaceOrientationLandscapeRight']}
 (BUNDLE / 'Info.plist').write_bytes(plistlib.dumps(info))
 sdk = subprocess.check_output(['xcrun', '--sdk', 'iphonesimulator', '--show-sdk-path'], text=True).strip()
 subprocess.run(['xcrun', 'swiftc', '-swift-version', '5', '-parse-as-library', '-sdk', sdk,
@@ -148,7 +169,7 @@ try:
     subprocess.run(['xcrun', 'simctl', 'install', device_id, str(BUNDLE)], check=True)
     container = Path(subprocess.check_output(['xcrun', 'simctl', 'get_app_container', device_id, info['CFBundleIdentifier'], 'data'], text=True).strip())
     results = []
-    for section in ['community', 'videos', 'browser', 'glass-blue', 'glass-orange']:
+    for section in ['community', 'videos', 'videos-landscape', 'browser', 'glass-blue', 'glass-orange']:
         subprocess.run(['xcrun', 'simctl', 'terminate', device_id, info['CFBundleIdentifier']], capture_output=True)
         ready = container / 'Documents/ready.json'
         if ready.exists(): ready.unlink()
@@ -158,7 +179,7 @@ try:
         assert ready.exists(), f'Native {section} preview did not become ready'
         result = json.loads(ready.read_text())
         assert 'error' not in result and result['scenario'] == section, result
-        assert result['dark'] == (section == 'videos'), result
+        assert result['dark'] == section.startswith('videos'), result
         subprocess.run(['xcrun', 'simctl', 'io', device_id, 'screenshot', str(OUT / f'{section}.png')], check=True)
         results.append(result)
         if not section.startswith('glass-'):

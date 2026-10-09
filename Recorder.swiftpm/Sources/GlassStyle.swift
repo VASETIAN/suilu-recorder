@@ -2,6 +2,19 @@ import SwiftUI
 
 extension View {
     @ViewBuilder
+    func recorderExtendedBackground() -> some View {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            backgroundExtensionEffect()
+        } else {
+            self
+        }
+        #else
+        self
+        #endif
+    }
+
+    @ViewBuilder
     func recorderGlass<S: Shape>(in shape: S, interactive: Bool = false) -> some View {
         #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
