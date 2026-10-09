@@ -3,6 +3,7 @@ from pathlib import Path
 import argparse
 import re
 import subprocess
+from check_lifecycle import extract
 
 root = Path(__file__).resolve().parent.parent
 sources = root / 'Recorder.swiftpm/Sources'
@@ -14,11 +15,74 @@ library = re.sub(r'static var root: URL \{.*?\n    \}', 'static var root: URL { 
 library = library.replace('FileManager.default.temporaryDirectory', 'checkDirectory')
 code = 'import Foundation\nlet checkDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("RecorderModelCheck-" + UUID().uuidString)\n' + code
 code += '\n' + library
+controller = (sources / 'RecorderController.swift').read_text(encoding='utf-8')
+code += '''\nfinal class EstimateDisplay {
+    var phase: RecordingPhase = .idle
+    var settings = RecorderSettings()
+    var availableSpace: Int64? = 10 * 1_073_741_824
+    var measuredRecordingRate: Double? = 1_000_000
+''' + extract(controller, 'func recordingTimeEstimate(') + '\n}\n'
 code += r'''
 let hdr120 = VideoMode(quality: .uhd4K, fps: 120, dynamicRange: .hdr)
 let sdr120 = VideoMode(quality: .uhd4K, fps: 120)
 let hdr60 = VideoMode(quality: .uhd4K, fps: 60, dynamicRange: .hdr)
 let hd30 = VideoMode(quality: .hd1080, fps: 30)
+var forecast = RecorderSettings()
+let free: Int64 = 10 * 1_073_741_824
+let baseTime = RecordingEstimate.seconds(settings: forecast, availableBytes: free)!
+assert(baseTime > 0)
+forecast.fps = 60
+assert(RecordingEstimate.seconds(settings: forecast, availableBytes: free)! < baseTime)
+forecast.fps = 120
+let highFPS = RecordingEstimate.seconds(settings: forecast, availableBytes: free)!
+forecast.dynamicRange = .hdr
+assert(RecordingEstimate.seconds(settings: forecast, availableBytes: free)! < highFPS)
+forecast.quality = .uhd4K
+assert(RecordingEstimate.seconds(settings: forecast, availableBytes: free)! < highFPS)
+forecast.reserveMB = 2048
+let largerReserve = RecordingEstimate.seconds(settings: forecast, availableBytes: free)!
+forecast.reserveMB = 512
+assert(RecordingEstimate.seconds(settings: forecast, availableBytes: free)! > largerReserve)
+let measured = RecordingEstimate.measuredRate(bytes: 10_000_000, duration: 10)!
+assert(abs(measured - 1_100_000) < 0.001)
+assert(abs(RecordingEstimate.seconds(settings: forecast, availableBytes: free, isRecording: true, measuredRate: measured)!
+    - Double(free - forecast.reserveBytes) / measured) < 0.001)
+for duration in [0.0, 4.9, Double.nan, Double.infinity] { assert(RecordingEstimate.measuredRate(bytes: 10_000_000, duration: duration) == nil) }
+assert(RecordingEstimate.measuredRate(bytes: 48, duration: 10) == nil)
+assert(RecordingEstimate.seconds(settings: forecast, availableBytes: nil) == nil)
+assert(RecordingEstimate.seconds(settings: forecast, availableBytes: -1) == nil)
+assert(RecordingEstimate.seconds(settings: forecast, availableBytes: forecast.reserveBytes) == 0)
+let nearlyFull = forecast.reserveBytes + 100 * 1_048_576
+assert(RecordingEstimate.seconds(settings: forecast, availableBytes: nearlyFull) == 0)
+assert(RecordingEstimate.seconds(settings: forecast, availableBytes: nearlyFull, isRecording: true)! > 0)
+for bad in [0.0, -1, Double.nan, Double.infinity] {
+    assert(RecordingEstimate.seconds(settings: forecast, availableBytes: free, measuredRate: bad)
+        == RecordingEstimate.seconds(settings: forecast, availableBytes: free))
+}
+forecast.dualCapture = true; forecast.fps = 24
+let dual24 = RecordingEstimate.seconds(settings: forecast, availableBytes: free)!
+forecast.fps = 30
+assert(RecordingEstimate.seconds(settings: forecast, availableBytes: free) == dual24)
+assert(RecordingEstimate.label(nil) == "暂时无法估算" && RecordingEstimate.label(0) == "空间不足")
+assert(RecordingEstimate.label(59) == "不足 1 分钟" && RecordingEstimate.label(3600) == "约 1 小时 0 分钟")
+print("PASS: recording estimates respond to resolution/fps/HDR/reserve, use measured write rate, respect start/stop storage limits and handle missing/invalid data")
+let display = EstimateDisplay()
+display.phase = .recording
+assert(display.recordingTimeEstimate(for: display.settings)
+    == RecordingEstimate.label(RecordingEstimate.seconds(settings: display.settings, availableBytes: display.availableSpace,
+        isRecording: true, measuredRate: display.measuredRecordingRate)))
+var changedDraft = display.settings
+changedDraft.quality = .uhd4K
+assert(display.recordingTimeEstimate(for: changedDraft)
+    == RecordingEstimate.label(RecordingEstimate.seconds(settings: changedDraft, availableBytes: display.availableSpace, isRecording: true)))
+changedDraft = display.settings; changedDraft.reserveMB = 2048
+assert(display.recordingTimeEstimate(for: changedDraft)
+    == RecordingEstimate.label(RecordingEstimate.seconds(settings: changedDraft, availableBytes: display.availableSpace,
+        isRecording: true, measuredRate: display.measuredRecordingRate)))
+display.phase = .idle
+assert(display.recordingTimeEstimate(for: display.settings)
+    == RecordingEstimate.label(RecordingEstimate.seconds(settings: display.settings, availableBytes: display.availableSpace)))
+print("PASS: production estimate display uses the active segment rate only for matching settings; draft/spec changes and idle state do not reuse a stale rate")
 assert(VideoMode.closest(to: hdr120, in: [hd30, sdr120, hdr60]) == sdr120)
 assert(VideoMode.closest(to: hdr120, in: [hd30, hdr120, hdr60]) == hdr120)
 assert(VideoMode.closest(to: sdr120, in: [hd30, hdr60]) == hdr60)

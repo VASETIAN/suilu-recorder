@@ -129,6 +129,9 @@ struct SettingsView: View {
 
                 Section("存储空间") {
                     LabeledContent("剩余空间", value: RecorderFiles.sizeLabel(recorder.availableSpace))
+                    LabeledContent("预计还可录像", value: recorder.recordingTimeEstimate(for: draft)).monospacedDigit()
+                    Text("按所选录像规格估算；录制中按实际写入速度更新，已扣除预留空间。画面复杂度、电量和温度会影响实际时长。")
+                        .font(.caption).foregroundStyle(.secondary)
                     Picker("保留空间", selection: $draft.reserveMB) {
                         Text("512 MB").tag(512)
                         Text("1 GB").tag(1024)

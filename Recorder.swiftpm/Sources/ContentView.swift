@@ -52,7 +52,7 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(ScreenPrivacyAnchor(enabled: recorder.settings.obscureAppSwitcher))
-        .preferredColorScheme(recorder.settings.interfaceMode == .browser ? .light : .dark)
+        .preferredColorScheme(recorder.settings.interfaceMode == .browser && !browser.isVideoPage ? .light : .dark)
         .statusBarHidden(isBlack)
         .persistentSystemOverlays(isBlack ? .hidden : .automatic)
         .sheet(isPresented: $showSettings) {
@@ -138,6 +138,10 @@ struct ContentView: View {
                 Text(recorder.activeLensLabel).font(.caption2).foregroundStyle(.white.opacity(0.65))
                 Text("剩余 \(RecorderFiles.sizeLabel(recorder.availableSpace))")
                     .font(.caption).foregroundStyle(.white.opacity(0.75))
+                if recorder.settings.captureMode == .video {
+                    Text("预计可录：\(recorder.recordingTimeEstimate(for: recorder.settings))")
+                        .font(.caption2).foregroundStyle(.white.opacity(0.75)).monospacedDigit()
+                }
                 if recorder.settings.includeLocation {
                     Label(location.status, systemImage: "location.fill").font(.caption2).foregroundStyle(.white.opacity(0.7))
                         .lineLimit(1)

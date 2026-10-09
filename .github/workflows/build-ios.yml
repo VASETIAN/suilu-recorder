@@ -20,6 +20,8 @@ jobs:
         run: python3 tools/check_video_modes.py
       - name: Check capture lifecycle and error recovery
         run: python3 tools/check_lifecycle.py
+      - name: Check browser theme transitions
+        run: python3 tools/check_browser_theme.py
       - name: Check preview switching and front-inset drag
         run: python3 tools/check_preview_lifecycle.py
       - name: Check dual-camera video composition and save

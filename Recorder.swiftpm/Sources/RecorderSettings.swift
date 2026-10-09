@@ -124,6 +124,37 @@ enum CameraZoom {
     }
 }
 
+enum RecordingEstimate {
+    static func measuredRate(bytes: Int64, duration: TimeInterval) -> Double? {
+        guard duration.isFinite, duration >= 5, bytes >= 262_144 else { return nil }
+        return Double(bytes) / duration * 1.1
+    }
+
+    static func seconds(settings: RecorderSettings, availableBytes: Int64?, isRecording: Bool = false,
+                        measuredRate: Double? = nil) -> TimeInterval? {
+        guard let free = availableBytes, free >= 0, [24, 30, 60, 120].contains(settings.fps) else { return nil }
+        let usable = max(0, Double(free) - Double(settings.reserveBytes))
+        if !isRecording && usable <= 256 * 1_048_576 { return 0 }
+        let pixels = Double(settings.quality.width) * Double(settings.quality.height)
+        // DualMovieWriter uses a fixed 6 bits/pixel/second H.264 target; single capture uses Apple's variable bitrate.
+        let videoBits = settings.dualCapture ? pixels * 6
+            : pixels * Double(settings.fps) * 0.15 * (settings.dynamicRange == .hdr ? 1.25 : 1)
+        let seedRate = (videoBits + (settings.microphoneEnabled ? 128_000 : 0)) / 8 * 1.03
+        // ponytail: this seed is an app estimate; calibrate the constants only if device measurements justify it.
+        let rate = measuredRate.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? seedRate
+        return usable / rate
+    }
+
+    static func label(_ seconds: TimeInterval?) -> String {
+        guard let seconds, seconds.isFinite, seconds >= 0, seconds < Double(Int.max) else { return "暂时无法估算" }
+        if seconds == 0 { return "空间不足" }
+        let minutes = Int(seconds / 60)
+        if minutes == 0 { return "不足 1 分钟" }
+        if minutes < 60 { return "约 \(minutes) 分钟" }
+        return "约 \(minutes / 60) 小时 \(minutes % 60) 分钟"
+    }
+}
+
 struct RecorderSettings: Codable, Equatable, Sendable {
     var quality: VideoQuality = .hd1080
     var fps = 30

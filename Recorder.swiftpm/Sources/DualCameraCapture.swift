@@ -162,6 +162,11 @@ final class DualCameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     private var ending = false
     private var expectedWidth = 0, expectedHeight = 0
     var elapsed: Double { movie?.elapsed ?? 0 }
+    var recordedBytes: Int64 {
+        guard let url = pendingURL, let values = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = values[.size] as? NSNumber else { return 0 }
+        return size.int64Value
+    }
     var insetOrigin = DualPreviewLayout.defaultOrigin
 
     static var devices: (AVCaptureDevice, AVCaptureDevice)? {

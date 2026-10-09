@@ -120,6 +120,7 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
         view.uiDelegate = self
         view.allowsBackForwardNavigationGestures = true
         view.scrollView.contentInsetAdjustmentBehavior = .never
+        view.isOpaque = false
         return view
     }()
 
@@ -127,6 +128,7 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
     func open(_ url: URL) {
         guard BrowserAddress.allows(url) else { notice = "只能打开网页网址。"; return }
         notice = nil
+        updatePage(for: url)
         // Set before the first request too: mobile redirects can happen before the delegate returns.
         webView.customUserAgent = BrowserAddress.prefersDesktop(url) ? desktopUserAgent : nil
         webView.load(URLRequest(url: url))
@@ -140,11 +142,17 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
     func home() { open(BrowserAddress.community) }
     func videos() { open(BrowserAddress.videos) }
     func back() {
-        if let url = webView.backForwardList.backItem?.url { webView.customUserAgent = BrowserAddress.prefersDesktop(url) ? desktopUserAgent : nil }
+        if let url = webView.backForwardList.backItem?.url {
+            updatePage(for: url)
+            webView.customUserAgent = BrowserAddress.prefersDesktop(url) ? desktopUserAgent : nil
+        }
         webView.goBack()
     }
     func forward() {
-        if let url = webView.backForwardList.forwardItem?.url { webView.customUserAgent = BrowserAddress.prefersDesktop(url) ? desktopUserAgent : nil }
+        if let url = webView.backForwardList.forwardItem?.url {
+            updatePage(for: url)
+            webView.customUserAgent = BrowserAddress.prefersDesktop(url) ? desktopUserAgent : nil
+        }
         webView.goForward()
     }
     func reloadOrStop() { if loading { webView.stopLoading(); refresh() } else { webView.reload() } }
@@ -154,17 +162,27 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
         loading = webView.isLoading
         canGoBack = webView.canGoBack
         canGoForward = webView.canGoForward
-        if let host = webView.url?.host {
+        if !loading, let url = webView.url { updatePage(for: url) }
+    }
+    private func updatePage(for url: URL) {
+        if let host = url.host?.lowercased() {
             let official = ["www.xiaoheihe.cn", "xiaoheihe.cn"].contains(host)
             siteLabel = official ? "小黑盒官方网页" : host
-            isCommunityPage = official && webView.url?.path.hasPrefix("/app/bbs/") == true
-            isVideoPage = webView.url.map(BrowserAddress.prefersDesktop) ?? false
+            isCommunityPage = official && url.path.hasPrefix("/app/bbs/")
         }
+        isVideoPage = BrowserAddress.prefersDesktop(url)
+        let background: UIColor = isVideoPage ? .black : .white
+        webView.backgroundColor = background
+        webView.scrollView.backgroundColor = background
+        webView.underPageBackgroundColor = background
     }
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         notice = nil; refresh()
     }
-    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) { refresh() }
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        if let url = webView.url { updatePage(for: url) }
+        refresh()
+    }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { refresh() }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failed(error) }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failed(error) }
@@ -186,6 +204,7 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
             decisionHandler(.cancel, preferences); return
         }
         if navigationAction.targetFrame?.isMainFrame != false {
+            updatePage(for: url)
             let desktop = BrowserAddress.prefersDesktop(url)
             preferences.preferredContentMode = desktop ? .desktop : .mobile
             webView.customUserAgent = desktop ? desktopUserAgent : nil
@@ -233,7 +252,7 @@ struct BrowserView: View {
                         .onSubmit(submitSearch).accessibilityLabel("网页搜索或网址")
                 }
                 .padding(.horizontal, 12).frame(height: 40)
-                .background(Color(white: 0.95), in: Capsule())
+                .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
                 Menu {
                     Text(browser.siteLabel)
                     Button(action: browser.back) { Label("返回上一页", systemImage: "chevron.left") }.disabled(!browser.canGoBack)
@@ -256,7 +275,7 @@ struct BrowserView: View {
                     Text(notice).font(.caption)
                     Spacer()
                     Button("关闭") { browser.notice = nil }.frame(minHeight: 44)
-                }.padding(.horizontal, 16).background(Color(white: 0.95))
+                }.padding(.horizontal, 16).background(Color(uiColor: .secondarySystemBackground))
             }
             RecorderWebPage(browser: browser).frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
@@ -266,7 +285,8 @@ struct BrowserView: View {
                 tab("设置", symbol: "gearshape", selected: false, action: settings)
             }.padding(.vertical, 6)
         }
-        .background(Color.white.ignoresSafeArea()).foregroundStyle(Color(white: 0.12)).tint(Color(white: 0.12))
+        .background(Color(uiColor: .systemBackground).ignoresSafeArea()).foregroundStyle(Color.primary).tint(Color.primary)
+        .preferredColorScheme(browser.isVideoPage ? .dark : .light)
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .onAppear { browser.startIfNeeded() }
         .onDisappear { browser.pauseMedia() }
@@ -282,7 +302,7 @@ struct BrowserView: View {
                 Text(title).font(.system(size: 11, weight: selected ? .semibold : .regular))
             }
             .frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
-            .foregroundStyle(selected ? Color(white: 0.12) : Color(white: 0.5))
+            .foregroundStyle(selected ? Color.primary : Color.secondary)
         }.buttonStyle(.plain)
     }
 

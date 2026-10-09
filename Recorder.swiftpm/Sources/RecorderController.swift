@@ -31,6 +31,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     @Published private(set) var torchOn = false
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var availableSpace: Int64?
+    @Published private(set) var measuredRecordingRate: Double?
     @Published private(set) var libraryItems: [MediaItem] = []
     @Published private(set) var livePhotoSupported = false
     @Published private(set) var multitaskingCameraSupported = false
@@ -183,6 +184,12 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             && (!settings.thermalProtection || captureLoad != .critical)
     }
     var canConfigure: Bool { phase == .idle && !isConfiguring }
+    func recordingTimeEstimate(for value: RecorderSettings) -> String {
+        let recording = phase == .recording
+        let measured = recording && value.hasSameCaptureConfiguration(as: settings) ? measuredRecordingRate : nil
+        return RecordingEstimate.label(RecordingEstimate.seconds(settings: value, availableBytes: availableSpace,
+                                                                  isRecording: recording, measuredRate: measured))
+    }
     var elapsedLabel: String {
         let seconds = max(0, Int(elapsed))
         return String(format: "%02d:%02d:%02d", seconds / 3600, (seconds / 60) % 60, seconds % 60)
@@ -1287,7 +1294,9 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         }
         if capturePhase == .recording {
             let value = dualRecorder?.elapsed ?? CMTimeGetSeconds(movieOutput.recordedDuration)
-            publish { self.elapsed = value.isFinite ? max(0, value) : 0 }
+            let bytes = dualRecorder?.recordedBytes ?? movieOutput.recordedFileSize
+            let rate = RecordingEstimate.measuredRate(bytes: bytes, duration: value)
+            publish { self.elapsed = value.isFinite ? max(0, value) : 0; self.measuredRecordingRate = rate }
         }
         if tickCount % 3 == 0 || capturePhase == .recording {
             let free = RecorderFiles.availableBytes()
@@ -1556,6 +1565,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         if configured && (value == .recording || value == .idle) { publishCapabilities() }
         publish {
             self.phase = value
+            if value == .idle || value == .preparing { self.measuredRecordingRate = nil }
             // System and low-space stops still need time to finish the file.
             if value == .finishing { self.beginFinishingTask() }
         }

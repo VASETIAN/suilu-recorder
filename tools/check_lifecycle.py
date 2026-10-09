@@ -104,11 +104,13 @@ extension String { static let video = "video"; var title: String { self } }
 final class ReplayMovie {
     var isRecording = true
     var recordedDuration: Double = 1
+    var recordedFileSize: Int64 = 0
     func stopRecording() { isRecording = false }
 }
 final class ReplayDual {
     DUAL_SESSION
     var elapsed: Double = 3
+    var recordedBytes: Int64 = 0
     var stops = 0
     func stop() { stops += 1 }
 }
@@ -127,6 +129,7 @@ final class Recorder: @unchecked Sendable {
     var finishingTask = false
     var tickCount = 0, elapsed: Double = 0
     var availableSpace: Int64?
+    var measuredRecordingRate: Double?
     var captureSettings = FakeSettings(), status = "ready"
     var activeItem: MediaItem? = MediaItem()
     var resumeAfterBackgroundPending = false, resumeSourceID: UUID?
@@ -272,6 +275,20 @@ lowSpace.fireTimer(); lowSpace.pump()
 assert(lowSpace.capturePhase == .finishing && !lowSpace.movieOutput.isRecording && lowSpace.finishingTask)
 RecorderFiles.freeBytes = 1024
 print("PASS: foreground-only stop/save and low-space protection after PiP removal")
+for dual in [false, true] {
+    let estimate = recordingRecorder()
+    if dual {
+        estimate.dualRecorder = ReplayDual()
+        estimate.dualRecorder!.elapsed = 10; estimate.dualRecorder!.recordedBytes = 10_000_000
+    } else {
+        estimate.movieOutput.recordedDuration = 10; estimate.movieOutput.recordedFileSize = 10_000_000
+    }
+    estimate.fireTimer(); estimate.pump()
+    assert(abs(estimate.measuredRecordingRate! - 1_100_000) < 0.001)
+    estimate.completedFile(); estimate.pump()
+    assert(estimate.measuredRecordingRate == nil)
+}
+print("PASS: both recording backends publish measured write rate and clear it after a segment")
 let dualBackground = recordingRecorder()
 dualBackground.dualRecorder = ReplayDual()
 dualBackground.sceneChanged(.background); dualBackground.pump()
@@ -515,7 +532,7 @@ print("PASS: settings start waits for applied video/active camera, starts once, 
 print("Replay uses fake session and queues; AVKit, Apple SDK and physical device behavior are not tested.")
 '''.replace('METHODS', '\n'.join(methods)).replace('SINGLE_SESSION', session_declaration(source)).replace('DUAL_SESSION', session_declaration(dual)).replace('VIEW_METHOD', extract(view, 'private func restoreOrResumeCapture()')).replace('SNAPSHOT_METHOD', extract(view, 'private func rememberBlackBeforeLeaving()')).replace('LAUNCH_METHOD', extract(view, 'private func handleCameraLaunchRequest()')).replace('BROWSER_BEGIN', extract(settings_view, 'private func startBrowsingRecording()')).replace('BROWSER_CONTINUE', extract(settings_view, 'private func continueBrowsingStart()'))
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(phase + '\n' + pip + '\n' + extract(settings, 'enum RecorderInterface:') + '\n' + extract(settings, 'enum CaptureLoad:') + '\n' + extract(settings, 'enum CameraErrorDetail {') + '\n' + harness, encoding='utf-8')
+    output.write_text(phase + '\n' + pip + '\n' + extract(settings, 'enum RecorderInterface:') + '\n' + extract(settings, 'enum CaptureLoad:') + '\n' + extract(settings, 'enum CameraErrorDetail {') + '\nenum RecordingEstimate {\n' + extract(settings, 'static func measuredRate(') + '\n}\n' + harness, encoding='utf-8')
 
 
 if __name__ == '__main__':
