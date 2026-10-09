@@ -335,16 +335,19 @@ struct BrowserView: View {
                 Divider()
                 HStack {
                     Button(action: browser.back) { Image(systemName: "chevron.left").frame(width: 44, height: 44) }
+                        .foregroundStyle(browser.canGoBack ? Color.primary : Color.secondary)
                         .disabled(!browser.canGoBack).accessibilityLabel("返回上一页")
                     Spacer()
                     Button(action: browser.forward) { Image(systemName: "chevron.right").frame(width: 44, height: 44) }
+                        .foregroundStyle(browser.canGoForward ? Color.primary : Color.secondary)
                         .disabled(!browser.canGoForward).accessibilityLabel("前进一页")
                     Spacer()
                     Text(browser.currentURL?.host ?? "新页面").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     Spacer()
                     Button(action: browser.reloadOrStop) {
                         Image(systemName: browser.loading ? "xmark" : "arrow.clockwise").frame(width: 44, height: 44)
-                    }.disabled(browser.currentURL == nil).accessibilityLabel(browser.loading ? "停止加载" : "刷新网页")
+                    }.foregroundStyle(browser.currentURL == nil ? Color.secondary : Color.primary)
+                        .disabled(browser.currentURL == nil).accessibilityLabel(browser.loading ? "停止加载" : "刷新网页")
                 }.font(.system(size: 18)).padding(.horizontal, 12)
             }
             Divider()
@@ -357,7 +360,10 @@ struct BrowserView: View {
         .background(Color(uiColor: .systemBackground).ignoresSafeArea()).foregroundStyle(Color.primary).tint(Color.primary)
         .preferredColorScheme(browser.isVideoPage ? .dark : .light)
         .ignoresSafeArea(.keyboard, edges: .bottom)
-        .onAppear { browser.startIfNeeded() }
+        .onAppear {
+            browser.startIfNeeded()
+            if browser.section == .browser { searchText = browser.currentURL?.absoluteString ?? "" }
+        }
         .onChange(of: browser.currentURL) { url in
             if browser.section == .browser && !searchFocused { searchText = url?.absoluteString ?? "" }
         }

@@ -5,6 +5,7 @@ The production SwiftUI and WKWebView code is compiled unchanged.
 """
 from pathlib import Path
 import json
+import os
 import platform
 import plistlib
 import re
@@ -94,7 +95,7 @@ subprocess.run(['xcrun', 'swiftc', '-swift-version', '5', '-parse-as-library', '
                 '-target', platform.machine() + '-apple-ios16.0-simulator',
                 str(ROOT / 'Recorder.swiftpm/Sources/RecorderSettings.swift'),
                 str(ROOT / 'Recorder.swiftpm/Sources/BrowserView.swift'), str(OUT / 'PreviewApp.swift'),
-                '-o', str(BUNDLE / 'BrowserUIPreview')], check=True)
+                '-o', str(BUNDLE / 'BrowserUIPreview')], check=True, env=dict(os.environ, SDKROOT=sdk))
 subprocess.run(['codesign', '--sign', '-', '--force', str(BUNDLE)], check=True)
 devices = json.loads(subprocess.check_output(['xcrun', 'simctl', 'list', 'devices', 'available', '--json']))['devices']
 choices = [(runtime, device) for runtime, items in devices.items() if '.iOS-' in runtime
