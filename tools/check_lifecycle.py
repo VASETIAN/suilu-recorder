@@ -21,8 +21,16 @@ def extract(source: str, signature: str) -> str:
     return source[start:end]
 
 
+def session_declaration(source: str) -> str:
+    if 'let session = {' in source:
+        return extract(source, 'let session = {') + '()'
+    start = source.index('let session = ')
+    return source[start:source.index('\n', start)]
+
+
 def build(controller: Path, output: Path):
     source = controller.read_text(encoding='utf-8')
+    dual = (ROOT / 'Recorder.swiftpm/Sources/DualCameraCapture.swift').read_text(encoding='utf-8')
     settings = (ROOT / 'Recorder.swiftpm/Sources/RecorderSettings.swift').read_text(encoding='utf-8')
     view = (ROOT / 'Recorder.swiftpm/Sources/ContentView.swift').read_text(encoding='utf-8')
     settings_view = (ROOT / 'Recorder.swiftpm/Sources/SettingsView.swift').read_text(encoding='utf-8')
@@ -31,7 +39,7 @@ def build(controller: Path, output: Path):
     methods = [extract(source, s) for s in (
         'func sceneChanged(', 'func setInterfaceMode(', 'private func finishCaptureStateOnQueue()',
         'private func setPhase(', 'private func stopOnQueue(',
-        'private func handleRuntimeErrorOnQueue(', 'private func completeCaptureOnQueue(',
+        'private func handleRuntimeErrorOnQueue(', 'private func handleSessionInterruptionOnQueue(', 'private func completeCaptureOnQueue(',
         'private func requestResumeOnQueue(', 'private func updateCaptureLoadOnQueue(')]
     if 'private func resumeSessionOnQueue()' in source:
         methods.append(extract(source, 'private func resumeSessionOnQueue()'))
@@ -52,6 +60,14 @@ final class ReplayQueue {
     func drain() { while !pending.isEmpty { pending.removeFirst()() } }
 }
 final class ReplaySession {
+    enum InterruptionReason: Int {
+        case videoDeviceNotAvailableInBackground = 1, audioDeviceInUseByAnotherClient = 2
+        case videoDeviceInUseByAnotherClient = 3, videoDeviceNotAvailableWithMultipleForegroundApps = 4
+        case videoDeviceNotAvailableDueToSystemPressure = 5
+    }
+    var usesApplicationAudioSession = true
+    var automaticallyConfiguresApplicationAudioSession = true
+    var configuresApplicationAudioSessionToMixWithOthers = false
     var isRunning = true
     var isInterrupted = false
     var isMultitaskingCameraAccessSupported = false
@@ -60,6 +76,8 @@ final class ReplaySession {
     func startRunning() { starts += 1; isRunning = !isInterrupted }
     func stopRunning() { isRunning = false }
 }
+typealias AVCaptureSession = ReplaySession
+typealias AVCaptureMultiCamSession = ReplaySession
 struct FakeSettings: Equatable {
     var captureMode = "video", mode = "4K · 60 fps · HDR"
     var reserveBytes: Int64 = 512
@@ -89,14 +107,15 @@ final class ReplayMovie {
     func stopRecording() { isRecording = false }
 }
 final class ReplayDual {
-    let session = ReplaySession()
+    DUAL_SESSION
     var elapsed: Double = 3
     var stops = 0
     func stop() { stops += 1 }
 }
 final class Recorder: @unchecked Sendable {
     let captureQueue = ReplayQueue(), uiQueue = ReplayQueue()
-    let session = ReplaySession(), movieOutput = ReplayMovie()
+    SINGLE_SESSION
+    let movieOutput = ReplayMovie()
     var activeSession: ReplaySession { dualRecorder?.session ?? session }
     var dualRecorder: ReplayDual?
 
@@ -163,6 +182,7 @@ final class Recorder: @unchecked Sendable {
     func manualStop() { stopOnQueue(reason: "manual") }
     func setLoad(_ value: CaptureLoad) { updateCaptureLoadOnQueue(value) }
     func interruptionEnded() { resumeSessionOnQueue() }
+    func interrupted(_ reason: Int?) { handleSessionInterruptionOnQueue(reason) }
     func runtimeError(_ error: NSError?, reportedInForeground: Bool = true) {
         handleRuntimeErrorOnQueue(error, reportedInForeground: reportedInForeground)
     }
@@ -173,6 +193,11 @@ final class Recorder: @unchecked Sendable {
     }
     METHODS
 }
+for session in [Recorder().session, ReplayDual().session] {
+    assert(session.usesApplicationAudioSession && session.automaticallyConfiguresApplicationAudioSession)
+    assert(session.configuresApplicationAudioSessionToMixWithOthers, "Capture still uses an exclusive audio policy")
+}
+print("PASS: both production session factories opt into audio mixing and preserve automatic microphone configuration (session stand-ins; not hardware audio coexistence)")
 // A file callback completes on captureQueue before its UI publications run.
 // UIKit foreground delivery can already be in flight on the main run loop.
 let raced = Recorder()
@@ -291,6 +316,33 @@ activeError.runtimeError(cameraError); activeError.pump()
 assert(activeError.capturePhase == .finishing && !activeError.movieOutput.isRecording && !activeError.isReady)
 assert(activeError.reports.count == 1 && activeError.lastCameraError!.contains("-11800"))
 print("PASS: bounded reset recovery, delayed/background errors, active recording finish and native NSError diagnostics")
+for dual in [false, true] {
+    for (reason, title) in [(2, "录音被系统中断"), (3, "相机被占用"), (4, "当前窗口模式不支持拍摄"), (5, "相机负载过高"), (99, "拍摄被系统中断")] {
+        let value = recordingRecorder()
+        if dual { value.dualRecorder = ReplayDual() }
+        value.activeSession.isInterrupted = true
+        value.resumeAfterBackgroundPending = true
+        value.interrupted(reason); value.pump()
+        assert(value.capturePhase == .finishing && !value.isReady && !value.resumeAfterBackgroundPending)
+        assert(value.reports.count == 1 && value.reports[0].hasPrefix(title + "\n"))
+        assert(value.lastCameraError!.contains("系统中断原因：\(reason)"))
+        if reason == 2 { assert(!value.status.contains("相机被占用")) }
+        if dual { assert(value.dualRecorder!.stops == 1) }
+        else { assert(!value.movieOutput.isRecording) }
+    }
+}
+let backgroundInterruption = recordingRecorder()
+backgroundInterruption.activeSession.isInterrupted = true
+backgroundInterruption.interrupted(1); backgroundInterruption.pump()
+assert(backgroundInterruption.capturePhase == .finishing && backgroundInterruption.reports.isEmpty)
+let unknownInterruption = recordingRecorder()
+unknownInterruption.activeSession.isInterrupted = true
+unknownInterruption.interrupted(nil); unknownInterruption.pump()
+assert(unknownInterruption.reports[0].hasPrefix("拍摄被系统中断\n") && unknownInterruption.lastCameraError!.contains("未提供"))
+let endedInterruption = recordingRecorder()
+endedInterruption.interrupted(2); endedInterruption.pump()
+assert(endedInterruption.capturePhase == .recording && endedInterruption.movieOutput.isRecording && endedInterruption.reports.isEmpty)
+print("PASS: audio/camera/window/pressure/unknown interruptions are distinguished, both backends finish safely, background has no alert, stale interruption preserves active recording")
 // Resume is opt-in, saves a separate segment, and consumes one pending intent.
 let defaultOff = recordingRecorder()
 defaultOff.sceneChanged(.background); defaultOff.pump()
@@ -461,7 +513,7 @@ blockedStart.recorder.isReady = false; blockedStart.begin()
 assert(!blockedStart.pendingBrowserStart && blockedStart.recorder.browserStarts.isEmpty)
 print("PASS: settings start waits for applied video/active camera, starts once, dismisses only after recording, cancels error/background/close and never retries a failed start")
 print("Replay uses fake session and queues; AVKit, Apple SDK and physical device behavior are not tested.")
-'''.replace('METHODS', '\n'.join(methods)).replace('VIEW_METHOD', extract(view, 'private func restoreOrResumeCapture()')).replace('SNAPSHOT_METHOD', extract(view, 'private func rememberBlackBeforeLeaving()')).replace('LAUNCH_METHOD', extract(view, 'private func handleCameraLaunchRequest()')).replace('BROWSER_BEGIN', extract(settings_view, 'private func startBrowsingRecording()')).replace('BROWSER_CONTINUE', extract(settings_view, 'private func continueBrowsingStart()'))
+'''.replace('METHODS', '\n'.join(methods)).replace('SINGLE_SESSION', session_declaration(source)).replace('DUAL_SESSION', session_declaration(dual)).replace('VIEW_METHOD', extract(view, 'private func restoreOrResumeCapture()')).replace('SNAPSHOT_METHOD', extract(view, 'private func rememberBlackBeforeLeaving()')).replace('LAUNCH_METHOD', extract(view, 'private func handleCameraLaunchRequest()')).replace('BROWSER_BEGIN', extract(settings_view, 'private func startBrowsingRecording()')).replace('BROWSER_CONTINUE', extract(settings_view, 'private func continueBrowsingStart()'))
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(phase + '\n' + pip + '\n' + extract(settings, 'enum RecorderInterface:') + '\n' + extract(settings, 'enum CaptureLoad:') + '\n' + extract(settings, 'enum CameraErrorDetail {') + '\n' + harness, encoding='utf-8')
 

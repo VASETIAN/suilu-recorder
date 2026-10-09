@@ -10,7 +10,13 @@ import UIKit
 // Sendability is checked manually because DispatchQueue confinement cannot be
 // expressed by Swift's actor annotations without moving the capture engine.
 final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputRecordingDelegate, @unchecked Sendable {
-    let session = AVCaptureSession()
+    let session = {
+        let value = AVCaptureSession()
+        value.usesApplicationAudioSession = true
+        if #available(iOS 18.0, *) { value.configuresApplicationAudioSessionToMixWithOthers = true }
+        // ponytail: iOS 16/17 retain Apple's defaults; add manual routing only if older-device mixing is needed.
+        return value
+    }()
     @Published private(set) var settings = RecorderSettings.load()
     @Published private(set) var phase: RecordingPhase = .idle
     @Published private(set) var isReady = false
@@ -1369,15 +1375,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             if self.phase.blocksConfiguration { self.beginFinishingTask() }
             self.captureQueue.async {
                 guard observed === self.activeSession else { return }
-                // A queued notification can outlive the interruption itself.
-                guard self.activeSession.isInterrupted else { self.resumeSessionOnQueue(); return }
-                self.turnTorchOff()
-                self.stopOnQueue(reason: "相机被系统中断，正在保存…")
-                self.publish { self.isReady = false; self.status = "相机暂被系统占用" }
-                if !background {
-                    self.resumeAfterBackgroundPending = false
-                    self.report("相机已中断", "相机可能被其他 App 占用，或当前窗口模式不支持摄像。回到前台全屏后可重试。")
-                }
+                self.handleSessionInterruptionOnQueue(reason)
             }
         })
         observers.append(center.addObserver(forName: .AVCaptureSessionInterruptionEnded,
@@ -1432,6 +1430,45 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                 } catch { /* Autofocus can resume on the next configuration. */ }
             }
         })
+    }
+
+    private func handleSessionInterruptionOnQueue(_ reason: Int?) {
+        // A queued notification can outlive the interruption itself.
+        guard activeSession.isInterrupted else { resumeSessionOnQueue(); return }
+        let title: String
+        let detail: String
+        switch reason.flatMap({ AVCaptureSession.InterruptionReason(rawValue: $0) }) {
+        case .audioDeviceInUseByAnotherClient:
+            title = "录音被系统中断"
+            detail = "系统暂时中断了录音设备，可能与音频播放、来电或其他音频会话冲突有关。这不表示网页正在使用相机。"
+        case .videoDeviceInUseByAnotherClient:
+            title = "相机被占用"
+            detail = "系统报告相机正由其他客户端使用。"
+        case .videoDeviceNotAvailableWithMultipleForegroundApps:
+            title = "当前窗口模式不支持拍摄"
+            detail = "系统在当前多窗口模式下暂停了相机，请返回全屏。"
+        case .videoDeviceNotAvailableDueToSystemPressure:
+            title = "相机负载过高"
+            detail = "系统因设备负载暂停了相机，请等待设备冷却。"
+        case .videoDeviceNotAvailableInBackground:
+            title = "拍摄已在后台暂停"
+            detail = "返回 App 后可继续拍摄。"
+        default:
+            title = "拍摄被系统中断"
+            detail = "系统暂时暂停了拍摄设备。"
+        }
+        turnTorchOff()
+        stopOnQueue(reason: "拍摄被系统中断，正在保存…")
+        publish { self.isReady = false; self.status = title + "，等待系统恢复" }
+        if reason != AVCaptureSession.InterruptionReason.videoDeviceNotAvailableInBackground.rawValue {
+            resumeAfterBackgroundPending = false
+            let diagnostic = detail + " 当前录像会停止并保存，设备恢复后可重试。\n系统中断原因：" + (reason.map(String.init) ?? "未提供")
+            publish {
+                self.lastCameraError = title + "\n" + diagnostic
+                UserDefaults.standard.set(self.lastCameraError, forKey: "Recorder.lastCameraError")
+            }
+            report(title, diagnostic)
+        }
     }
 
     private func handleRuntimeErrorOnQueue(_ error: NSError?, reportedInForeground: Bool) {

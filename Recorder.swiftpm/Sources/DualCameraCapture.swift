@@ -137,7 +137,13 @@ final class DualMovieWriter: @unchecked Sendable {
 #if os(iOS)
 final class DualCameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
                                AVCaptureAudioDataOutputSampleBufferDelegate, @unchecked Sendable {
-    let session = AVCaptureMultiCamSession()
+    let session = {
+        let value = AVCaptureMultiCamSession()
+        value.usesApplicationAudioSession = true
+        if #available(iOS 18.0, *) { value.configuresApplicationAudioSessionToMixWithOthers = true }
+        // ponytail: iOS 16/17 retain Apple's defaults; add manual routing only if older-device mixing is needed.
+        return value
+    }()
     private(set) var rearInput: AVCaptureDeviceInput?
     private(set) var frontInput: AVCaptureDeviceInput?
     private let rear = AVCaptureVideoDataOutput(), front = AVCaptureVideoDataOutput()
