@@ -29,11 +29,19 @@ def build(output: Path):
     [data-e2e="feed-active-video"]{width:100%;height:100%;background:#242424;color:white}
     .xgplayer-playswitch-tab{position:absolute;right:12px;top:50%;width:36px}
     .xgplayer-playswitch-tab>div{width:36px;height:40px;background:#ddd;cursor:pointer}
+    #login-modal{display:none;position:fixed;inset:0;align-items:center;justify-content:center;background:#aaa}
+    #douyin_login_comp_flat_panel{width:726px;height:483px;background:white}
+    #douyin_login_comp_flat_panel>header{display:flex;justify-content:space-between;padding:10px}
+    #douyin_login_comp_flat_panel_title{width:264px;font-size:24px}
+    #douyin_login_landing_flat_container{display:flex;width:726px}
+    #douyin_login_landing_flat_container>div{width:253px;height:264px;margin-left:56px;flex-shrink:0}
+    #douyin_login_landing_flat_container>div+div{margin-left:108px}
     </style></head><body><div id="root"><div id="dark"><nav id="douyin-navigation">Desktop nav</nav>
     <main id="douyin-right-container"><header id="douyin-header"><button id="login">登录</button></header>
     <div id="slidelist" class="recommend-slidelist"><div data-e2e="slideList"><div data-e2e="feed-active-video">
     <span id="video-surface">Video</span><button id="interactive">Like</button></div></div>
     <div class="xgplayer-playswitch-tab"><div data-e2e="video-switch-prev-arrow">↑</div><div data-e2e="video-switch-next-arrow">↓</div></div></div></main></div></div>
+    <div id="login-modal"><article id="douyin_login_comp_flat_panel"><header><div id="douyin_login_comp_flat_panel_title">Login title</div><button id="close-modal">X</button></header><div id="douyin_login_landing_flat_container"><div>QR</div><div><input id="login-field"></div></div></article></div>
     <script>window.nextCount=0;window.prevCount=0;document.querySelector('[data-e2e="video-switch-next-arrow"]').onclick=()=>nextCount++;
     document.querySelector('[data-e2e="video-switch-prev-arrow"]').onclick=()=>prevCount++;</script></body></html>'''
     query = r'''(() => {
@@ -53,8 +61,12 @@ def build(output: Path):
         swipe(document.querySelector('#interactive'),0,-150);swipe(document.querySelector('#login'),0,-150);
         next.classList.add('disabled');swipe(surface,0,-150);next.classList.remove('disabled');
         next.setAttribute('aria-disabled','true');swipe(surface,0,-150);
-        return {ok:fits && nextCount===1 && prevCount===1 && navigator.userAgent.includes('Macintosh') && !navigator.userAgent.includes('iPhone'),
-                fits,nextCount,prevCount,width:innerWidth,scrollWidth:document.documentElement.scrollWidth};
+        document.querySelector('#login-modal').style.display='flex';
+        const panel=document.querySelector('#douyin_login_comp_flat_panel'), p=panel.getBoundingClientRect();
+        const close=document.querySelector('#close-modal').getBoundingClientRect(), field=document.querySelector('#login-field').getBoundingClientRect();
+        const loginFits=p.left>=0 && p.right<=innerWidth && close.right<=p.right && field.left>=p.left && field.right<=p.right && panel.scrollWidth<=panel.clientWidth+1;
+        return {ok:fits && loginFits && nextCount===1 && prevCount===1 && navigator.userAgent.includes('Macintosh') && !navigator.userAgent.includes('iPhone'),
+                fits,loginFits,nextCount,prevCount,width:innerWidth,scrollWidth:document.documentElement.scrollWidth};
     })()'''
     swift = r'''
 import Cocoa
@@ -89,7 +101,7 @@ FIXTURE
 QUERY
 """#) { result, error in
             guard error == nil, let values = result as? [String: Any], values["ok"] as? Bool == true else { self.fail("\(String(describing: result)), \(String(describing: error))"); return }
-            print("PASS: production Douyin WebKit adapter at \(self.widths[self.index])px fits the desktop feed and visible arrows; vertical swipe changes video, taps/controls/disabled arrows/multi-touch are protected; desktop UA selected")
+            print("PASS: production Douyin WebKit adapter at \(self.widths[self.index])px fits desktop feed, arrows and login fields; vertical swipe changes video, taps/controls/disabled arrows/multi-touch are protected; desktop UA selected")
             self.index += 1
             if self.index == self.widths.count { exit(0) }
             self.run()

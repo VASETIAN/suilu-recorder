@@ -86,6 +86,10 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
                     #douyin-header { left:0!important; width:100%!important; overflow-x:auto; }
                     #slidelist.recommend-slidelist [data-e2e="slideList"] { padding-right:44px!important; }
                     #slidelist .xgplayer-playswitch-tab { right:4px!important; }
+                    #douyin_login_comp_flat_panel { max-width:calc(100vw - 24px)!important; max-height:90vh!important; height:auto!important; overflow:auto!important; }
+                    #douyin_login_comp_flat_panel_title { max-width:calc(100% - 54px)!important; font-size:18px!important; }
+                    #douyin_login_landing_flat_container { width:100%!important; flex-direction:column!important; align-items:center!important; gap:24px!important; padding:16px 12px 24px!important; }
+                    #douyin_login_landing_flat_container > div { margin:0!important; max-width:100%!important; }
                 }
             `;
             document.documentElement.appendChild(style);
