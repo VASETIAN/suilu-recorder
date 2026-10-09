@@ -11,6 +11,8 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
     @Published var isCommunityPage = true
     @Published var isVideoPage = false
 
+    private let desktopUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
+
     lazy var webView: WKWebView = {
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences.preferredContentMode = .mobile
@@ -69,6 +71,46 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
         """
         configuration.userContentController.addUserScript(WKUserScript(
             source: mobileCommunity, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        let desktopVideo = """
+        if (location.hostname === 'douyin.com' || location.hostname.endsWith('.douyin.com')) {
+            const viewport = document.querySelector('meta[name="viewport"]') || document.createElement('meta');
+            viewport.name = 'viewport';
+            viewport.content = 'width=device-width, initial-scale=1.0';
+            if (!viewport.parentNode) document.head.appendChild(viewport);
+            const style = document.createElement('style');
+            style.textContent = `
+                @media (max-width: 768px) {
+                    html, body, #root, #dark { min-width:0!important; width:100%!important; }
+                    #douyin-navigation { display:none!important; }
+                    #douyin-right-container { width:100%!important; margin-left:0!important; }
+                    #douyin-header { left:0!important; width:100%!important; overflow-x:auto; }
+                    #slidelist.recommend-slidelist [data-e2e="slideList"] { padding-right:44px!important; }
+                    #slidelist .xgplayer-playswitch-tab { right:4px!important; }
+                }
+            `;
+            document.documentElement.appendChild(style);
+            let start = null;
+            document.addEventListener('touchstart', event => {
+                const target = event.target;
+                start = event.touches.length === 1 && target.closest('#slidelist')
+                    && !target.closest('button, a, input, textarea, [role="button"], .xgplayer-controls')
+                    ? { x:event.touches[0].clientX, y:event.touches[0].clientY } : null;
+            }, {passive:true});
+            document.addEventListener('touchend', event => {
+                const previous = start; start = null;
+                if (!previous || !event.changedTouches.length) return;
+                const dx = event.changedTouches[0].clientX - previous.x;
+                const dy = event.changedTouches[0].clientY - previous.y;
+                if (Math.abs(dy) < 80 || Math.abs(dx) > Math.abs(dy) * 0.6) return;
+                const direction = dy < 0 ? 'next' : 'prev';
+                const arrow = document.querySelector('[data-e2e="video-switch-' + direction + '-arrow"]');
+                if (arrow && !arrow.classList.contains('disabled') && arrow.getAttribute('aria-disabled') !== 'true') arrow.click();
+            }, {passive:true});
+            document.addEventListener('touchcancel', () => { start = null; }, {passive:true});
+        }
+        """
+        configuration.userContentController.addUserScript(WKUserScript(
+            source: desktopVideo, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
         let view = WKWebView(frame: .zero, configuration: configuration)
         view.navigationDelegate = self
         view.uiDelegate = self
@@ -81,6 +123,8 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
     func open(_ url: URL) {
         guard BrowserAddress.allows(url) else { notice = "只能打开网页网址。"; return }
         notice = nil
+        // Set before the first request too: mobile redirects can happen before the delegate returns.
+        webView.customUserAgent = BrowserAddress.prefersDesktop(url) ? desktopUserAgent : nil
         webView.load(URLRequest(url: url))
     }
     func search(_ text: String) {
@@ -91,8 +135,14 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
     }
     func home() { open(BrowserAddress.community) }
     func videos() { open(BrowserAddress.videos) }
-    func back() { webView.goBack() }
-    func forward() { webView.goForward() }
+    func back() {
+        if let url = webView.backForwardList.backItem?.url { webView.customUserAgent = BrowserAddress.prefersDesktop(url) ? desktopUserAgent : nil }
+        webView.goBack()
+    }
+    func forward() {
+        if let url = webView.backForwardList.forwardItem?.url { webView.customUserAgent = BrowserAddress.prefersDesktop(url) ? desktopUserAgent : nil }
+        webView.goForward()
+    }
     func reloadOrStop() { if loading { webView.stopLoading(); refresh() } else { webView.reload() } }
     func pauseMedia() { webView.pauseAllMediaPlayback() }
 
@@ -104,7 +154,7 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
             let official = ["www.xiaoheihe.cn", "xiaoheihe.cn"].contains(host)
             siteLabel = official ? "小黑盒官方网页" : host
             isCommunityPage = official && webView.url?.path.hasPrefix("/app/bbs/") == true
-            isVideoPage = host == "douyin.com" || host.hasSuffix(".douyin.com")
+            isVideoPage = webView.url.map(BrowserAddress.prefersDesktop) ?? false
         }
     }
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
@@ -123,14 +173,20 @@ final class RecorderBrowser: NSObject, ObservableObject, WKNavigationDelegate, W
         refresh(); notice = "网页进程已退出，请刷新页面；录制状态可在设置中查看。"
     }
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+                 preferences: WKWebpagePreferences,
+                 decisionHandler: @escaping (WKNavigationActionPolicy, WKWebpagePreferences) -> Void) {
         guard let url = navigationAction.request.url, BrowserAddress.allows(url) else {
             if navigationAction.targetFrame?.isMainFrame != false {
                 notice = "此链接要打开其他 App，浏览模式仅打开网页。"
             }
-            decisionHandler(.cancel); return
+            decisionHandler(.cancel, preferences); return
         }
-        decisionHandler(.allow)
+        if navigationAction.targetFrame?.isMainFrame != false {
+            let desktop = BrowserAddress.prefersDesktop(url)
+            preferences.preferredContentMode = desktop ? .desktop : .mobile
+            webView.customUserAgent = desktop ? desktopUserAgent : nil
+        }
+        decisionHandler(.allow, preferences)
     }
     // Links that request a new window stay in this single web view.
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,

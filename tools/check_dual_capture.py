@@ -54,7 +54,8 @@ for (width, height, audio) in [(640, 480, true), (480, 640, false)] {
     let front = pixels(width: width, height: height, color: CIColor(red: 1, green: 0, blue: 0))
     var began = 0
     for i in 0..<64 {
-        if try movie.append(rear: rear, front: front, at: CMTime(value: Int64(i), timescale: 30)) { began += 1 }
+        let origin = i < 32 ? DualPreviewLayout.defaultOrigin : CGPoint(x: 0.65, y: 0.65)
+        if try movie.append(rear: rear, front: front, at: CMTime(value: Int64(i), timescale: 30), insetOrigin: origin) { began += 1 }
         if audio { try movie.appendAudio(sound(i)) }
         Thread.sleep(forTimeInterval: 0.02)
     }
@@ -79,19 +80,23 @@ for (width, height, audio) in [(640, 480, true), (480, 640, false)] {
             let size = try await videos[0].load(.naturalSize)
             assert(Int(size.width) == width && Int(size.height) == height)
             let generator = AVAssetImageGenerator(asset: asset)
-            let decoded = try await generator.image(at: CMTime(value: 1, timescale: 1)).image
-            let image = CIImage(cgImage: decoded)
+            generator.requestedTimeToleranceBefore = .zero
+            generator.requestedTimeToleranceAfter = .zero
             let context = CIContext()
-            func rgb(_ x: Double, _ y: Double) -> [UInt8] {
+            func rgb(_ image: CIImage, _ x: Double, _ y: Double) -> [UInt8] {
                 var bytes = [UInt8](repeating: 0, count: 4)
                 context.render(image, toBitmap: &bytes, rowBytes: 4,
                     bounds: CGRect(x: Double(width) * x, y: Double(height) * y, width: 1, height: 1),
                     format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB())
                 return bytes
             }
-            let face = rgb(0.1, 0.85), back = rgb(0.5, 0.5)
+            let initial = CIImage(cgImage: try await generator.image(at: CMTime(value: 15, timescale: 30)).image)
+            let moved = CIImage(cgImage: try await generator.image(at: CMTime(value: 45, timescale: 30)).image)
+            let face = rgb(initial, 0.1, 0.65), back = rgb(initial, 0.5, 0.5)
+            let movedFace = rgb(moved, 0.75, 0.2), cleared = rgb(moved, 0.1, 0.65)
             assert(face[0] > 180 && face[2] < 80 && back[2] > 180 && back[0] < 80)
-            print("PASS: production dual writer encodes/decodes \(width)x\(height), front red inset + rear blue background, \(audio ? "H.264 + AAC tracks" : "video-only track"), monotonic timing and complete finish")
+            assert(movedFace[0] > 180 && movedFace[2] < 80 && cleared[2] > 180 && cleared[0] < 80)
+            print("PASS: production dual writer encodes/decodes \(width)x\(height), dragged front inset moves in the saved file, \(audio ? "H.264 + AAC tracks" : "video-only track"), monotonic timing and complete finish")
         } catch { inspected.error = error }
         inspected.done.signal()
     }

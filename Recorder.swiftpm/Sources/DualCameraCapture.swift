@@ -2,6 +2,24 @@
 import CoreImage
 import Foundation
 
+enum DualPreviewLayout {
+    static let fraction: CGFloat = 0.28
+    static let margin: CGFloat = 0.035
+    static let defaultOrigin = CGPoint(x: margin, y: 0.20)
+
+    static func clamped(_ origin: CGPoint) -> CGPoint {
+        let upper = 1 - margin - fraction
+        return CGPoint(x: min(max(origin.x.isFinite ? origin.x : defaultOrigin.x, margin), upper),
+                       y: min(max(origin.y.isFinite ? origin.y : defaultOrigin.y, margin), upper))
+    }
+
+    static func rect(in bounds: CGRect, origin: CGPoint) -> CGRect {
+        let point = clamped(origin)
+        return CGRect(x: bounds.minX + bounds.width * point.x, y: bounds.minY + bounds.height * point.y,
+                      width: bounds.width * fraction, height: bounds.height * fraction)
+    }
+}
+
 // All writer/capture state is confined to RecorderController's capture queue.
 final class DualMovieWriter: @unchecked Sendable {
     let writer: AVAssetWriter
@@ -42,16 +60,16 @@ final class DualMovieWriter: @unchecked Sendable {
         if let sound { writer.add(sound) }
     }
 
-    static func composite(rear: CIImage, front: CIImage, bounds: CGRect) -> CIImage {
+    static func composite(rear: CIImage, front: CIImage, bounds: CGRect, insetOrigin: CGPoint = DualPreviewLayout.defaultOrigin) -> CIImage {
         func fill(_ image: CIImage, in rect: CGRect) -> CIImage {
             let scale = max(rect.width / image.extent.width, rect.height / image.extent.height)
             let scaled = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
             return scaled.transformed(by: CGAffineTransform(
                 translationX: rect.midX - scaled.extent.midX, y: rect.midY - scaled.extent.midY)).cropped(to: rect)
         }
-        let inset = bounds.width * 0.035
-        let small = CGRect(x: inset, y: bounds.height * 0.72 - inset,
-                           width: bounds.width * 0.28, height: bounds.height * 0.28)
+        var small = DualPreviewLayout.rect(in: bounds, origin: insetOrigin)
+        // Preview coordinates start at the top; Core Image starts at the bottom.
+        small.origin.y = bounds.maxY - (small.maxY - bounds.minY)
         return fill(front, in: small).composited(over: fill(rear, in: bounds)).cropped(to: bounds)
     }
 
@@ -61,7 +79,7 @@ final class DualMovieWriter: @unchecked Sendable {
     }
 
     @discardableResult
-    func append(rear: CVPixelBuffer, front: CVPixelBuffer, at time: CMTime) throws -> Bool {
+    func append(rear: CVPixelBuffer, front: CVPixelBuffer, at time: CMTime, insetOrigin: CGPoint = DualPreviewLayout.defaultOrigin) throws -> Bool {
         guard !closing else { return false }
         if started && time <= lastTime { return false }
         if !firstTime.isValid {
@@ -74,7 +92,7 @@ final class DualMovieWriter: @unchecked Sendable {
         guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &output) == kCVReturnSuccess, let output else {
             throw Self.error("双摄视频缓冲区不足。")
         }
-        let image = Self.composite(rear: CIImage(cvPixelBuffer: rear), front: CIImage(cvPixelBuffer: front), bounds: bounds)
+        let image = Self.composite(rear: CIImage(cvPixelBuffer: rear), front: CIImage(cvPixelBuffer: front), bounds: bounds, insetOrigin: insetOrigin)
         context.render(image, to: output, bounds: bounds, colorSpace: CGColorSpaceCreateDeviceRGB())
         guard adaptor.append(output, withPresentationTime: time) else {
             throw writer.error ?? Self.error("双摄视频写入失败。")
@@ -138,6 +156,7 @@ final class DualCameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     private var ending = false
     private var expectedWidth = 0, expectedHeight = 0
     var elapsed: Double { movie?.elapsed ?? 0 }
+    var insetOrigin = DualPreviewLayout.defaultOrigin
 
     static var devices: (AVCaptureDevice, AVCaptureDevice)? {
         guard AVCaptureMultiCamSession.isMultiCamSupported else { return nil }
@@ -191,7 +210,6 @@ final class DualCameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     private func configureDevices(_ back: AVCaptureDevice, _ face: AVCaptureDevice, mode: VideoMode, audio: Bool) throws {
         session.beginConfiguration()
         defer { session.commitConfiguration() }
-        for connection in session.connections { session.removeConnection(connection) }
         for output in session.outputs { session.removeOutput(output) }
         for input in session.inputs { session.removeInput(input) }
         session.automaticallyConfiguresCaptureDeviceForWideColor = false
@@ -257,10 +275,9 @@ final class DualCameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     }
 
     func detach() {
-        // Release device connections before configuring the next capture session.
+        // Preview layers must already be disconnected by the controller on this queue.
         if session.isRunning { session.stopRunning() }
         session.beginConfiguration()
-        for connection in session.connections { session.removeConnection(connection) }
         for output in session.outputs { session.removeOutput(output) }
         for input in session.inputs { session.removeInput(input) }
         session.commitConfiguration()
@@ -320,7 +337,7 @@ final class DualCameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDel
                 movie = try DualMovieWriter(url: url, width: CVPixelBufferGetWidth(pixels), height: CVPixelBufferGetHeight(pixels),
                                             fps: fps, audio: includeAudio, metadata: metadata)
             }
-            if try movie?.append(rear: pixels, front: face, at: time) == true { onStart?() }
+            if try movie?.append(rear: pixels, front: face, at: time, insetOrigin: insetOrigin) == true { onStart?() }
         } catch { stop(error: error) }
     }
 }

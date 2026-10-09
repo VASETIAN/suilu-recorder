@@ -41,17 +41,70 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     @Published var shareExport: MediaExport?
     private var preparedShare: MediaExport?
     private var failedPhotosExports = 0
-    @Published private(set) var dualPreview: DualCameraCapture?
+    @Published private(set) var dualCaptureActive = false
+    @Published private(set) var frontPreviewOrigin = DualPreviewLayout.defaultOrigin
     let dualCaptureModes = DualCameraCapture.modes
     var dualCaptureSupported: Bool { !dualCaptureModes.isEmpty }
     private var dualRecorder: DualCameraCapture?
     private var activeSession: AVCaptureSession { dualRecorder?.session ?? session }
 
-    func attachDualPreview(_ back: AVCaptureVideoPreviewLayer, _ face: AVCaptureVideoPreviewLayer) {
+    private weak var rearPreviewLayer: AVCaptureVideoPreviewLayer?
+    private weak var facePreviewLayer: AVCaptureVideoPreviewLayer?
+    private var frontInsetOrigin = DualPreviewLayout.defaultOrigin
+
+    func attachPreview(_ back: AVCaptureVideoPreviewLayer, _ face: AVCaptureVideoPreviewLayer) {
         captureQueue.async {
-            guard let dual = self.dualRecorder, back.session !== dual.session || face.session !== dual.session else { return }
-            dual.attachPreview(back, face)
-            self.publish { self.objectWillChange.send() }
+            if self.rearPreviewLayer !== back || self.facePreviewLayer !== face {
+                self.disconnectPreviewOnQueue()
+                self.rearPreviewLayer = back
+                self.facePreviewLayer = face
+            }
+            self.bindPreviewOnQueue()
+        }
+    }
+
+    func detachPreview(_ back: AVCaptureVideoPreviewLayer, _ face: AVCaptureVideoPreviewLayer) {
+        captureQueue.async {
+            guard self.rearPreviewLayer === back, self.facePreviewLayer === face else { return }
+            self.disconnectPreviewOnQueue()
+            self.rearPreviewLayer = nil
+            self.facePreviewLayer = nil
+        }
+    }
+
+    private func disconnectPreviewOnQueue() {
+        rearPreviewLayer?.session = nil
+        facePreviewLayer?.session = nil
+    }
+
+    private func bindPreviewOnQueue() {
+        guard configured, let back = rearPreviewLayer, let face = facePreviewLayer else { return }
+        if let dual = dualRecorder {
+            if back.session !== dual.session || face.session !== dual.session { dual.attachPreview(back, face) }
+        } else {
+            face.session = nil
+            if back.session !== session { back.session = session }
+        }
+        updatePreviewConnectionsOnQueue()
+    }
+
+    private func updatePreviewConnectionsOnQueue() {
+        for (layer, mirrored) in [(rearPreviewLayer, captureSettings.frontCamera && dualRecorder == nil), (facePreviewLayer, false)] {
+            guard let connection = layer?.connection else { continue }
+            if connection.isVideoOrientationSupported && connection.videoOrientation != orientation { connection.videoOrientation = orientation }
+            if connection.isVideoMirroringSupported {
+                connection.automaticallyAdjustsVideoMirroring = false
+                connection.isVideoMirrored = mirrored
+            }
+        }
+    }
+
+    func moveFrontPreview(_ origin: CGPoint) {
+        let point = DualPreviewLayout.clamped(origin)
+        frontPreviewOrigin = point
+        captureQueue.async {
+            self.frontInsetOrigin = point
+            self.dualRecorder?.insetOrigin = self.frontInsetOrigin
         }
     }
 
@@ -283,6 +336,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             }
             do {
                 let applied = try self.configureOnQueue(requested, displayedZoom: displayedZoom)
+                self.bindPreviewOnQueue()
                 if !self.activeSession.isRunning { self.activeSession.startRunning() }
                 let running = self.activeSession.isRunning && !self.activeSession.isInterrupted
                 self.publish {
@@ -295,6 +349,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                 self.publishCapabilities()
                 self.readCaptureLoadOnQueue()
             } catch {
+                self.bindPreviewOnQueue()
                 let ready = self.configured && self.activeSession.isRunning && !self.activeSession.isInterrupted
                 self.publish {
                     self.isConfiguring = false
@@ -314,9 +369,11 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             let previous = captureSettings
             turnTorchOff()
             if activeSession.isRunning { activeSession.stopRunning() }
+            // Detach the layers before removing the old session's inputs/connections.
+            disconnectPreviewOnQueue()
             dualRecorder?.detach()
             dualRecorder = nil
-            publish { self.dualPreview = nil }
+            publish { self.dualCaptureActive = false }
             session.beginConfiguration()
             for input in session.inputs { session.removeInput(input) }
             for output in session.outputs { session.removeOutput(output) }
@@ -330,8 +387,9 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
                     applied.quality = mode.quality; applied.fps = mode.fps; applied.dynamicRange = .sdr
                     applied.frontCamera = false; applied.rearLens = .automatic
                     videoInput = dual.rearInput; zoomScale = 1
+                    dual.insetOrigin = frontInsetOrigin
                     dualRecorder = dual; captureSettings = applied; configured = true
-                    publish { self.dualPreview = dual }
+                    publish { self.dualCaptureActive = true }
                     if mode != requested.mode {
                         publish { self.showMessage("双摄录像格式", "已使用设备支持的 \(mode.title)。关闭双摄后可重新选择单摄的高画质与高帧率。") }
                     }
@@ -766,7 +824,10 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         case .portraitUpsideDown: value = .portraitUpsideDown
         default: value = .portrait
         }
-        captureQueue.async { self.orientation = value }
+        captureQueue.async {
+            self.orientation = value
+            self.updatePreviewConnectionsOnQueue()
+        }
     }
 
     func startRecording(location: CaptureLocation? = nil, resumedFrom: UUID? = nil) {

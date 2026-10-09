@@ -68,7 +68,13 @@ assert(RecorderSettings.load().fps == 30)
 new.captureMode = .photo; new.save()
 assert(RecorderSettings.load().captureMode == .video) // Browser form always uses movie output.
 
-assert(BrowserAddress.videos.absoluteString == "https://www.douyin.com/" && BrowserAddress.allows(BrowserAddress.videos))
+assert(BrowserAddress.videos.absoluteString == "https://www.douyin.com/?recommend=1&from_nav=1" && BrowserAddress.allows(BrowserAddress.videos))
+for address in ["https://www.douyin.com/", "https://douyin.com/", "https://live.douyin.com/", "https://WWW.DOUYIN.COM/"] {
+    assert(BrowserAddress.prefersDesktop(URL(string: address)!))
+}
+for address in ["https://www.xiaoheihe.cn/app/bbs/home", "https://douyin.com.example.com/", "https://evildouyin.com/", "https://example.com/?douyin.com", "about:blank"] {
+    assert(!BrowserAddress.prefersDesktop(URL(string: address)!))
+}
 assert(BrowserAddress.destination("  https://www.xiaoheihe.cn/app/bbs/home  ") == BrowserAddress.community)
 assert(BrowserAddress.destination("example.com/test?q=1")?.absoluteString == "https://example.com/test?q=1")
 let search = URLComponents(url: BrowserAddress.destination("苹果 & 相机 #测试")!, resolvingAgainstBaseURL: false)!

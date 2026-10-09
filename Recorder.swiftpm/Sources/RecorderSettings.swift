@@ -79,7 +79,11 @@ enum RecorderInterface: String, Codable, CaseIterable, Identifiable, Sendable {
 
 enum BrowserAddress {
     static let community = URL(string: "https://www.xiaoheihe.cn/app/bbs/home")!
-    static let videos = URL(string: "https://www.douyin.com/")!
+    static func prefersDesktop(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased() else { return false }
+        return host == "douyin.com" || host.hasSuffix(".douyin.com")
+    }
+    static let videos = URL(string: "https://www.douyin.com/?recommend=1&from_nav=1")!
     static func allows(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(), ["https", "http"].contains(scheme),
               let host = url.host, !host.isEmpty, url.user == nil, url.password == nil else { return false }

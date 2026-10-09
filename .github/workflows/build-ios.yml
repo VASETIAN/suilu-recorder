@@ -20,10 +20,14 @@ jobs:
         run: python3 tools/check_video_modes.py
       - name: Check capture lifecycle and error recovery
         run: python3 tools/check_lifecycle.py
+      - name: Check preview switching and front-inset drag
+        run: python3 tools/check_preview_lifecycle.py
       - name: Check dual-camera video composition and save
         run: python3 tools/check_dual_capture.py
       - name: Check browser masks and scrolling in WebKit
         run: python3 tools/check_browser_layout.py
+      - name: Check desktop video layout and swipe controls in WebKit
+        run: python3 tools/check_douyin_web.py
       - name: Build unsigned iPhoneOS App
         shell: bash
         run: |
