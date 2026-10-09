@@ -74,11 +74,12 @@ browser.startIfNeeded()
 let community = browser.webView
 assert(community.url == BrowserAddress.community && community.loadCount == 1)
 community.scrollPosition = 345
-browser.search("原神 & /?#% 电影")
+browser.search("原神 & /?#% C++ 电影")
 let postSearch = community.url!
 let items = URLComponents(url:postSearch,resolvingAgainstBaseURL:false)!.queryItems!
 assert(postSearch.host == "www.xiaoheihe.cn" && postSearch.path == "/app/search/list")
-assert(items.first(where:{$0.name == "q"})?.value == "原神 & /?#% 电影")
+assert(items.first(where:{$0.name == "q"})?.value == "原神 & /?#% C++ 电影")
+assert(!URLComponents(url:postSearch,resolvingAgainstBaseURL:false)!.percentEncodedQuery!.contains("+"))
 assert(items.first(where:{$0.name == "search_type"})?.value == "link")
 browser.select(.videos)
 let video = browser.webView
@@ -97,9 +98,10 @@ assert(general !== community && general !== video && general.url == nil && brows
 assert(!browser.isVideoPage && !browser.canGoBack)
 browser.search("example.com"); check(false)
 assert(general.url!.host == "example.com")
-browser.search("原神 & Swift")
+browser.search("原神 & C++")
 assert(general.url!.host == "www.bing.com")
-assert(URLComponents(url:general.url!,resolvingAgainstBaseURL:false)!.queryItems!.first?.value == "原神 & Swift")
+assert(URLComponents(url:general.url!,resolvingAgainstBaseURL:false)!.queryItems!.first?.value == "原神 & C++")
+assert(!URLComponents(url:general.url!,resolvingAgainstBaseURL:false)!.percentEncodedQuery!.contains("+"))
 for section in BrowserSection.allCases { assert(BrowserAddress.search(" \n ",in:section) == nil) }
 let beforeInvalid = general.url
 for invalid in ["file:///private/test", "javascript:alert(1)", "https://name:password@example.com"] {

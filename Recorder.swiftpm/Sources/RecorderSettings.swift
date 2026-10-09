@@ -120,6 +120,8 @@ enum BrowserAddress {
         case .community:
             var url = URLComponents(string: "https://www.xiaoheihe.cn/app/search/list")!
             url.queryItems = [URLQueryItem(name: "q", value: text), URLQueryItem(name: "search_type", value: "link")]
+            // Websites decode query '+' as a space, unlike URLComponents.
+            url.percentEncodedQuery = url.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
             return url.url
         case .videos:
             let allowed = CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "/%?#"))
@@ -150,6 +152,7 @@ enum BrowserAddress {
         }
         var query = URLComponents(string: "https://www.bing.com/search")!
         query.queryItems = [URLQueryItem(name: "q", value: text)]
+        query.percentEncodedQuery = query.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
         return query.url
     }
 }
