@@ -43,20 +43,24 @@ import WebKit
     let browser = RecorderBrowser()
     let scenario = CommandLine.arguments.last ?? "community"
     var section: BrowserSection { scenario.hasPrefix("videos") ? .videos : BrowserSection(rawValue: scenario) ?? .community }
-    func application(_ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+    func application(_ application: UIApplication, configurationForConnecting session: UISceneSession, options: UIScene.ConnectionOptions) -> UISceneConfiguration {
+        let configuration = UISceneConfiguration(name:"Preview",sessionRole:session.role)
+        configuration.delegateClass = PreviewScene.self
+        return configuration
+    }
+    func show(in scene: UIWindowScene) {
         browser.select(section)
         let host = UIHostingController(rootView: BrowserView(browser: browser, settings: {}))
-        window = UIWindow(frame: UIScreen.main.bounds)
+        window = UIWindow(windowScene: scene)
         window?.rootViewController = host
         window?.makeKeyAndVisible()
-        window?.windowScene?.requestGeometryUpdate(.iOS(interfaceOrientations: scenario == "videos-landscape" ? .landscapeRight : .portrait))
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: scenario == "videos-landscape" ? .landscapeRight : .portrait))
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
             if self.section == .browser { self.ready(["nativeStartPage": true]); return }
             let html = try! String(contentsOf: Bundle.main.url(forResource: self.section.rawValue, withExtension: "html")!)
             self.browser.webView.loadHTMLString(html, baseURL: self.section.home)
             self.check(remaining: 30)
         }
-        return true
     }
     func check(remaining: Int) {
         browser.webView.evaluateJavaScript("""
@@ -137,12 +141,19 @@ import WebKit
         try! JSONSerialization.data(withJSONObject:value,options:[.sortedKeys]).write(to:url,options:.atomic)
     }
 }
+@MainActor final class PreviewScene: UIResponder, UIWindowSceneDelegate {
+    func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options: UIScene.ConnectionOptions) {
+        (UIApplication.shared.delegate as! PreviewApp).show(in:scene as! UIWindowScene)
+    }
+}
 '''
 (OUT / 'PreviewApp.swift').write_text(harness)
 info = {'CFBundleExecutable': 'BrowserUIPreview', 'CFBundleIdentifier': 'com.tians.browser-ui-check',
         'CFBundleName': 'Browser UI Check', 'CFBundlePackageType': 'APPL', 'CFBundleVersion': '1',
         'CFBundleShortVersionString': '1.0', 'MinimumOSVersion': '16.0', 'UIDeviceFamily': [1],
         'LSRequiresIPhoneOS': True, 'UILaunchScreen': {},
+        'UIApplicationSceneManifest': {'UIApplicationSupportsMultipleScenes': False,
+            'UISceneConfigurations': {'UIWindowSceneSessionRoleApplication': [{'UISceneConfigurationName': 'Preview'}]}},
         'UISupportedInterfaceOrientations': ['UIInterfaceOrientationPortrait', 'UIInterfaceOrientationLandscapeLeft', 'UIInterfaceOrientationLandscapeRight']}
 (BUNDLE / 'Info.plist').write_bytes(plistlib.dumps(info))
 sdk = subprocess.check_output(['xcrun', '--sdk', 'iphonesimulator', '--show-sdk-path'], text=True).strip()
