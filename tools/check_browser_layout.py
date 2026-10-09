@@ -62,7 +62,8 @@ final class LayoutCheck: NSObject, WKNavigationDelegate {
         window.setContentSize(size)
         view.setFrameSize(size)
         let html = searchResults ? fixture.replacingOccurrences(of: "page-bbs-community", with: "page-bbs-list")
-            .replacingOccurrences(of: "bbs-community__search-module", with: "search-wrapper") : fixture
+            .replacingOccurrences(of: "bbs-community__search-module", with: "search-wrapper")
+            .replacingOccurrences(of: "bbs-home__content-item hb-bbs-home__feed-splitline", with: "bbs-home__content-item search-result__link") : fixture
         view.loadHTMLString(html, baseURL: URL(string: "https://www.xiaoheihe.cn/app/bbs/home"))
     }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
