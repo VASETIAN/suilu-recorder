@@ -31,6 +31,9 @@ def build(output: Path, preview_source: Path):
         'private func accessibilityMoveFront('])
     harness = r'''
 import Foundation
+#if canImport(CoreGraphics)
+import CoreGraphics
+#endif
 final class ReplayQueue {
     static var inCapture = false
     var pending: [() -> Void] = []
