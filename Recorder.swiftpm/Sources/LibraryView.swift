@@ -13,11 +13,14 @@ struct LibraryView: View {
     @State private var day = Date()
     @State private var selecting = false
     @State private var selectedIDs: Set<UUID> = []
+    @State private var path: [UUID] = []
+    @State private var confirmingDelete = false
+    @State private var pendingDelete: [MediaItem] = []
     private var items: [MediaItem] { MediaLibrary.filtered(recorder.libraryItems, kind: filter, day: filterByDate ? day : nil) }
     private var selected: [MediaItem] { items.filter { selectedIDs.contains($0.id) } }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             VStack(spacing: 0) {
                 Picker("类型", selection: $filter) {
                     Text("全部").tag(Optional<CaptureMode>.none)
@@ -42,30 +45,31 @@ struct LibraryView: View {
                     ScrollView {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 10)], spacing: 14) {
                             ForEach(items) { item in
-                                if selecting {
-                                    Button {
-                                        if selectedIDs.contains(item.id) { selectedIDs.remove(item.id) }
-                                        else { selectedIDs.insert(item.id) }
-                                    } label: {
-                                        tile(item).overlay(alignment: .topTrailing) {
+                                Button { openOrSelect(item.id) } label: {
+                                    tile(item).overlay(alignment: .topTrailing) {
+                                        if selecting {
                                             Image(systemName: selectedIDs.contains(item.id) ? "checkmark.circle.fill" : "circle")
                                                 .foregroundStyle(.white).padding(8).background(.black.opacity(0.5), in: Circle())
                                         }
-                                    }.buttonStyle(.plain).accessibilityLabel("\(item.kind.title)，\(item.dateLabel)")
-                                        .accessibilityValue(selectedIDs.contains(item.id) ? "已选中" : "未选中")
-                                } else {
-                                    NavigationLink { MediaDetailView(recorder: recorder, itemID: item.id) } label: { tile(item) }
-                                        .buttonStyle(.plain)
-                                }
+                                    }
+                                }.buttonStyle(.plain)
+                                    .highPriorityGesture(LongPressGesture(minimumDuration: 0.45).onEnded { _ in beginSelection(item.id) })
+                                    .accessibilityLabel("\(item.kind.title)，\(item.dateLabel)")
+                                    .accessibilityValue(selecting ? selectedIDs.contains(item.id) ? "已选中" : "未选中" : "")
+                                    .accessibilityHint(selecting ? "轻点切换选择状态" : "轻点查看，长按多选")
+                                    .accessibilityAction(named: "选择此项") { beginSelection(item.id) }
+                                    .accessibilityIdentifier("library-item-\(item.id)")
                             }
                         }.padding(.horizontal).padding(.bottom)
                     }
                 }
             }
             .navigationTitle("内置图库 · \(recorder.libraryItems.count)")
+            .navigationDestination(for: UUID.self) { MediaDetailView(recorder: recorder, itemID: $0) }
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button(selecting ? "取消选择" : "选择") { selecting.toggle(); selectedIDs.removeAll() }
+                        .accessibilityIdentifier("library-select")
                 }
                 ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } }
             }
@@ -78,17 +82,36 @@ struct LibraryView: View {
                             Button("全选当前结果") { selectedIDs = Set(items.map(\.id)) }.font(.caption)
                         }
                         HStack {
-                            Button("导出系统照片") { recorder.exportToPhotos(selected) }
-                                .disabled(selected.isEmpty || !recorder.exportingPhotoIDs.isEmpty)
+                            Menu {
+                                Button { recorder.exportToPhotos(selected) } label: { Label("导出到系统照片", systemImage: "square.and.arrow.down") }
+                                    .disabled(!recorder.exportingPhotoIDs.isEmpty)
+                                Button { recorder.prepareShare(selected) } label: { Label("原件与拍摄信息", systemImage: "square.and.arrow.up") }
+                                    .disabled(recorder.preparingShare || recorder.shareExport != nil)
+                            } label: { Label("导出", systemImage: "square.and.arrow.up") }
+                                .disabled(selected.isEmpty || !recorder.deletingMediaIDs.isEmpty)
+                                .accessibilityIdentifier("library-export")
                             Spacer()
-                            Button("原件与拍摄信息") { recorder.prepareShare(selected) }
-                                .disabled(selected.isEmpty || recorder.preparingShare)
+                            Button(role: .destructive) {
+                                pendingDelete = selected
+                                confirmingDelete = true
+                            } label: { Label("删除", systemImage: "trash") }
+                                .disabled(selected.isEmpty || !recorder.canConfigure || !recorder.deletingMediaIDs.isEmpty
+                                    || !recorder.exportingPhotoIDs.isDisjoint(with: selectedIDs)
+                                    || recorder.preparingShare || recorder.shareExport != nil)
+                                .accessibilityIdentifier("library-delete")
                         }
+                        if !recorder.deletingMediaIDs.isEmpty { ProgressView("正在删除 \(recorder.deletingMediaIDs.count) 项…") }
                         Text("系统照片批量导出跳过已导出项；原件与信息可在共享页存到文件。")
                             .font(.caption2).foregroundStyle(.secondary)
                     }.padding().recorderGlass(in: RoundedRectangle(cornerRadius: 24))
                         .padding(.horizontal, 16).padding(.bottom, 8)
                 }
+            }
+            .confirmationDialog("删除已选的 \(pendingDelete.count) 项？", isPresented: $confirmingDelete, titleVisibility: .visible) {
+                Button("删除 \(pendingDelete.count) 项", role: .destructive) { recorder.deleteMedia(pendingDelete) }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("会删除这些内容的 App 内原件，无法撤销。Live Photo 的照片与动态片段会一起删除；已导出到系统照片的副本不受影响。")
             }
             .sheet(item: $recorder.shareExport, onDismiss: recorder.finishSharing) { export in ShareMediaView(urls: export.urls) }
         }
@@ -97,9 +120,22 @@ struct LibraryView: View {
         .onChange(of: filter) { _ in selectedIDs.removeAll() }
         .onChange(of: filterByDate) { _ in selectedIDs.removeAll() }
         .onChange(of: day) { _ in selectedIDs.removeAll() }
+        .onChange(of: recorder.libraryItems.map(\.id)) { selectedIDs.formIntersection($0) }
         .alert(item: $recorder.message) { value in
             Alert(title: Text(value.title), message: Text(value.detail), dismissButton: .default(Text("知道了")))
         }
+    }
+
+    private func beginSelection(_ id: UUID) {
+        selecting = true
+        selectedIDs.insert(id)
+    }
+
+    private func openOrSelect(_ id: UUID) {
+        if selecting {
+            if selectedIDs.contains(id) { selectedIDs.remove(id) }
+            else { selectedIDs.insert(id) }
+        } else { path.append(id) }
     }
 
     private func tile(_ item: MediaItem) -> some View {
@@ -160,7 +196,7 @@ private struct MediaDetailView: View {
                             }.buttonStyle(.borderedProminent).disabled(recorder.exportingPhotoIDs.contains(item.id))
                             Button { recorder.prepareShare([item]) } label: { Label("原件与信息", systemImage: "square.and.arrow.up") }
                                 .buttonStyle(.bordered)
-                                .disabled(recorder.preparingShare)
+                                .disabled(recorder.preparingShare || !recorder.deletingMediaIDs.isEmpty)
                         }.disabled(!recorder.canConfigure)
                         if recorder.exportingPhotoIDs.contains(item.id) { ProgressView("正在导出…") }
                         if recorder.preparingShare { ProgressView("正在准备原件…") }
@@ -203,7 +239,7 @@ private struct MediaDetailView: View {
                         Text("导出后 App 内原件保留。删除 App 或工程的应用数据会失去仅保存在内置图库的内容。")
                             .font(.caption).foregroundStyle(.secondary)
                         Button("删除 App 内原件", role: .destructive) { deleting = true }
-                            .disabled(!recorder.canConfigure || recorder.exportingPhotoIDs.contains(item.id) || recorder.preparingShare || recorder.shareExport != nil)
+                            .disabled(!recorder.canConfigure || !recorder.deletingMediaIDs.isEmpty || recorder.exportingPhotoIDs.contains(item.id) || recorder.preparingShare || recorder.shareExport != nil)
                     }.padding()
                 }
                 .confirmationDialog("再次导出会在系统照片中添加一份副本", isPresented: $repeatExport, titleVisibility: .visible) {

@@ -43,6 +43,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     @Published private(set) var captureLoad: CaptureLoad = .normal
     @Published private(set) var thumbnailGeneration = 0
     @Published private(set) var exportingPhotoIDs: Set<UUID> = []
+    @Published private(set) var deletingMediaIDs: Set<UUID> = []
     @Published private(set) var photosExportStatus = ""
     @Published private(set) var preparingShare = false
     @Published var shareExport: MediaExport?
@@ -1181,7 +1182,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     }
 
     func exportToPhotos(_ items: [MediaItem], allowRepeats: Bool = false, automatic: Bool = false) {
-        let values = items.filter { !exportingPhotoIDs.contains($0.id) && (allowRepeats || $0.exportedAt == nil) }
+        let values = items.filter { !exportingPhotoIDs.contains($0.id) && !deletingMediaIDs.contains($0.id) && (allowRepeats || $0.exportedAt == nil) }
         guard !values.isEmpty else { return }
         if exportingPhotoIDs.isEmpty { failedPhotosExports = 0 }
         exportingPhotoIDs.formUnion(values.map(\.id))
@@ -1254,7 +1255,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     }
 
     func prepareShare(_ items: [MediaItem]) {
-        guard !preparingShare, shareExport == nil, !items.isEmpty else { return }
+        guard !preparingShare, shareExport == nil, deletingMediaIDs.isEmpty, !items.isEmpty else { return }
         preparingShare = true
         mediaQueue.async {
             do {
@@ -1274,13 +1275,35 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         mediaQueue.async { try? FileManager.default.removeItem(at: export.folder) }
     }
 
-    func deleteMedia(_ item: MediaItem) {
-        guard canConfigure, !exportingPhotoIDs.contains(item.id), !preparingShare, shareExport == nil else { return }
+    func deleteMedia(_ item: MediaItem) { deleteMedia([item]) }
+
+    func deleteMedia(_ items: [MediaItem]) {
+        let ids = Set(items.map(\.id))
+        let values = libraryItems.filter { ids.contains($0.id) }
+        guard !values.isEmpty else { return }
+        guard canConfigure, deletingMediaIDs.isEmpty, exportingPhotoIDs.isDisjoint(with: ids), !preparingShare, shareExport == nil else {
+            showMessage("暂时无法删除", "请先结束拍摄，并等待所选内容的导出或原件共享完成。")
+            return
+        }
+        deletingMediaIDs = Set(values.map(\.id))
         captureQueue.async {
-            guard self.capturePhase == .idle else { return }
-            do { try MediaLibrary.delete(item) }
-            catch { self.report("删除失败", error.localizedDescription) }
+            guard self.capturePhase == .idle else {
+                self.publish { self.deletingMediaIDs.removeAll() }
+                self.report("暂时无法删除", "拍摄状态已变化，请结束拍摄或保存后重试。")
+                return
+            }
+            var failures: [String] = []
+            for item in values {
+                do { try MediaLibrary.delete(item) }
+                catch { failures.append(error.localizedDescription) }
+            }
             self.refreshLibraryOnQueue()
+            let failureCount = failures.count
+            let detail = "已删除 \(values.count - failureCount) 项，\(failureCount) 项未删除，可重新选择后重试。\n" + (failures.first ?? "")
+            self.publish {
+                self.deletingMediaIDs.removeAll()
+                if failureCount > 0 { self.showMessage("删除未全部完成", detail) }
+            }
         }
     }
 

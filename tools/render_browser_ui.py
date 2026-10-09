@@ -226,6 +226,7 @@ print(String(data:try! JSONSerialization.data(withJSONObject:["meanRGB":means,"m
     (OUT / 'verification.json').write_text(json.dumps({'device':device['name'], 'runtime':runtime,
         'production_sources_unchanged':True, 'content':'synthetic fixtures; browser native start page',
         'physical_device_test':False, 'sections':results,'dynamic_glass':change}, indent=2))
+    subprocess.run(['python3',str(ROOT/'tools/check_library_ui.py'),'--device',device_id],check=True)
 finally:
     subprocess.run(['xcrun', 'simctl', 'terminate', device_id, info['CFBundleIdentifier']], capture_output=True)
     if booted: subprocess.run(['xcrun', 'simctl', 'shutdown', device_id], check=True)
