@@ -162,7 +162,7 @@ struct SettingsView: View {
 
                 Section("操作与高负载保护") {
                     Toggle("拍摄操作震动反馈", isOn: $draft.hapticFeedback)
-                    Text("开始录像为中等轻震，停止为轻震，原文件保存成功为成功反馈。设备不支持触觉反馈时不会震动。")
+                    Text("确认开始录像后震动一次，黑屏录制也有效；停止为轻震，原文件保存成功为成功反馈。设备不支持触觉反馈时不会震动。")
                         .font(.caption).foregroundStyle(.secondary)
                     Toggle("温度和相机高负载保护", isOn: $draft.thermalProtection)
                     Text(recorder.captureLoad.warning ?? "温度和相机负载正常")

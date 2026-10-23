@@ -99,6 +99,12 @@ struct LibraryView: View {
                                     || !recorder.exportingPhotoIDs.isDisjoint(with: selectedIDs)
                                     || recorder.preparingShare || recorder.shareExport != nil)
                                 .accessibilityIdentifier("library-delete")
+                                .confirmationDialog("删除已选的 \(pendingDelete.count) 项？", isPresented: $confirmingDelete, titleVisibility: .visible) {
+                                    Button("删除 \(pendingDelete.count) 项", role: .destructive) { recorder.deleteMedia(pendingDelete) }
+                                    Button("取消", role: .cancel) {}
+                                } message: {
+                                    Text("会删除这些内容的 App 内原件，无法撤销。Live Photo 的照片与动态片段会一起删除；已导出到系统照片的副本不受影响。")
+                                }
                         }
                         if !recorder.deletingMediaIDs.isEmpty { ProgressView("正在删除 \(recorder.deletingMediaIDs.count) 项…") }
                         Text("系统照片批量导出跳过已导出项；原件与信息可在共享页存到文件。")
@@ -106,12 +112,6 @@ struct LibraryView: View {
                     }.padding().recorderGlass(in: RoundedRectangle(cornerRadius: 24))
                         .padding(.horizontal, 16).padding(.bottom, 8)
                 }
-            }
-            .confirmationDialog("删除已选的 \(pendingDelete.count) 项？", isPresented: $confirmingDelete, titleVisibility: .visible) {
-                Button("删除 \(pendingDelete.count) 项", role: .destructive) { recorder.deleteMedia(pendingDelete) }
-                Button("取消", role: .cancel) {}
-            } message: {
-                Text("会删除这些内容的 App 内原件，无法撤销。Live Photo 的照片与动态片段会一起删除；已导出到系统照片的副本不受影响。")
             }
             .sheet(item: $recorder.shareExport, onDismiss: recorder.finishSharing) { export in ShareMediaView(urls: export.urls) }
         }

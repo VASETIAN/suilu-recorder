@@ -11,6 +11,8 @@ struct CameraPreview: UIViewRepresentable {
 
     func makeUIView(context: Context) -> CapturePreviewView {
         let view = CapturePreviewView()
+        let generation = recorder.previewGeneration
+        view.previewGeneration = generation
         view.frontOrigin = recorder.frontPreviewOrigin
         view.previewLayer.videoGravity = .resizeAspectFill
         view.onFocus = { recorder.focus(at: $0) }
@@ -22,9 +24,9 @@ struct CameraPreview: UIViewRepresentable {
             recorder.updateOrientation($0)
         }
         view.onWindowChange = { [weak view] in
-            if let view { recorder.attachPreview(view.previewLayer, view.frontPreviewLayer) }
+            if let view { recorder.attachPreview(view.previewLayer, view.frontPreviewLayer, generation: generation) }
         }
-        recorder.attachPreview(view.previewLayer, view.frontPreviewLayer)
+        recorder.attachPreview(view.previewLayer, view.frontPreviewLayer, generation: generation)
         return view
     }
 
@@ -34,7 +36,7 @@ struct CameraPreview: UIViewRepresentable {
             && (recorder.phase == .idle || recorder.phase == .recording)
         view.dualCapture = recorder.dualCaptureActive
         view.frontOrigin = recorder.frontPreviewOrigin
-        recorder.attachPreview(view.previewLayer, view.frontPreviewLayer)
+        recorder.attachPreview(view.previewLayer, view.frontPreviewLayer, generation: view.previewGeneration)
         view.reportOrientation()
     }
 
@@ -46,6 +48,7 @@ struct CameraPreview: UIViewRepresentable {
 }
 
 final class CapturePreviewView: UIView, UIGestureRecognizerDelegate {
+    var previewGeneration = 0
     let previewLayer = AVCaptureVideoPreviewLayer()
     let frontPreviewLayer = AVCaptureVideoPreviewLayer()
     var dualCapture = false {
