@@ -50,6 +50,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     private var preparedShare: MediaExport?
     private var failedPhotosExports = 0
     @Published private(set) var dualCaptureActive = false
+    @Published private(set) var previewGeneration = 0
     @Published private(set) var frontPreviewOrigin = DualPreviewLayout.defaultOrigin
     let dualCaptureModes = DualCameraCapture.modes
     var dualCaptureSupported: Bool { !dualCaptureModes.isEmpty }
@@ -59,9 +60,11 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     private weak var rearPreviewLayer: AVCaptureVideoPreviewLayer?
     private weak var facePreviewLayer: AVCaptureVideoPreviewLayer?
     private var frontInsetOrigin = DualPreviewLayout.defaultOrigin
+    private var previewGenerationOnQueue = 0
 
-    func attachPreview(_ back: AVCaptureVideoPreviewLayer, _ face: AVCaptureVideoPreviewLayer) {
+    func attachPreview(_ back: AVCaptureVideoPreviewLayer, _ face: AVCaptureVideoPreviewLayer, generation: Int) {
         captureQueue.async {
+            guard generation == self.previewGenerationOnQueue else { return }
             if self.rearPreviewLayer !== back || self.facePreviewLayer !== face {
                 self.disconnectPreviewOnQueue()
                 self.rearPreviewLayer = back
@@ -83,6 +86,14 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
     private func disconnectPreviewOnQueue() {
         rearPreviewLayer?.session = nil
         facePreviewLayer?.session = nil
+    }
+
+    private func retirePreviewOnQueue() {
+        disconnectPreviewOnQueue()
+        rearPreviewLayer = nil; facePreviewLayer = nil
+        previewGenerationOnQueue += 1
+        let generation = previewGenerationOnQueue
+        publish { self.previewGeneration = generation }
     }
 
     private func bindPreviewOnQueue() {
@@ -121,6 +132,15 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
         var value = settings
         value.dualCapture.toggle()
         value.captureMode = .video
+        apply(value)
+    }
+
+    func setVideoMode(_ requested: VideoMode) {
+        guard canConfigure, isReady, settings.captureMode == .video, !supportedModes.isEmpty else { return }
+        let mode = VideoMode.closest(to: requested, in: supportedModes)
+        guard mode != settings.mode else { return }
+        var value = settings
+        value.quality = mode.quality; value.fps = mode.fps; value.dynamicRange = mode.dynamicRange
         apply(value)
     }
 
@@ -384,7 +404,7 @@ final class RecorderController: NSObject, ObservableObject, AVCaptureFileOutputR
             turnTorchOff()
             if activeSession.isRunning { activeSession.stopRunning() }
             // Detach the layers before removing the old session's inputs/connections.
-            disconnectPreviewOnQueue()
+            retirePreviewOnQueue()
             dualRecorder?.detach()
             dualRecorder = nil
             publish { self.dualCaptureActive = false }

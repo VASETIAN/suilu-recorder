@@ -18,7 +18,8 @@ def build(output: Path, preview_source: Path):
     geometry = extract((src / 'DualCameraCapture.swift').read_text(encoding='utf-8'), 'enum DualPreviewLayout {')
     methods = '\n'.join(extract(controller, s) for s in [
         'func attachPreview(', 'func detachPreview(', 'private func disconnectPreviewOnQueue(',
-        'private func bindPreviewOnQueue(', 'private func updatePreviewConnectionsOnQueue(', 'func moveFrontPreview('])
+        'private func retirePreviewOnQueue(', 'private func bindPreviewOnQueue(',
+        'private func updatePreviewConnectionsOnQueue(', 'func moveFrontPreview('])
     # Exercise the production mode-change ordering, without mocking all hardware configuration.
     teardown = controller.split('if dualRecorder != nil || requested.dualCapture {', 1)[1]
     teardown = teardown[teardown.index('if activeSession.isRunning'):teardown.index('publish { self.dualCaptureActive')]
@@ -85,6 +86,9 @@ final class DualCameraCapture {
 }
 final class RecorderController {
     let captureQueue = ReplayQueue(), session = AVCaptureSession()
+    let uiQueue = ReplayQueue()
+    var previewGeneration = 0, previewGenerationOnQueue = 0
+    func publish(_ work: @escaping () -> Void) { uiQueue.async(work) }
     weak var rearPreviewLayer: AVCaptureVideoPreviewLayer?, facePreviewLayer: AVCaptureVideoPreviewLayer?
     var dualRecorder: DualCameraCapture?
     var activeSession: AVCaptureSession { dualRecorder?.session ?? session }
@@ -97,6 +101,7 @@ final class RecorderController {
     var orientation: AVCaptureVideoOrientation = .portrait
     var zoom: CGFloat = 1
     var dualPreview: DualCameraCapture? { dualRecorder }
+    func attachPreview(_ back: AVCaptureVideoPreviewLayer, _ face: AVCaptureVideoPreviewLayer) { attachPreview(back, face, generation: previewGeneration) }
     func attachDualPreview(_ back: AVCaptureVideoPreviewLayer, _ face: AVCaptureVideoPreviewLayer) { attachPreview(back, face) }
     func focus(at point: CGPoint) {}
     func setZoom(_ factor: CGFloat) {}
@@ -114,6 +119,7 @@ final class UIPanGestureRecognizer: UIGestureRecognizer {
     func translation(in view: CapturePreviewView) -> CGPoint { delta }
 }
 final class CapturePreviewView {
+    var previewGeneration = 0
     let previewLayer = AVCaptureVideoPreviewLayer(), frontPreviewLayer = AVCaptureVideoPreviewLayer()
     var frontOrigin = DualPreviewLayout.defaultOrigin, panStart = DualPreviewLayout.defaultOrigin
     let frontPan = UIPanGestureRecognizer()
@@ -142,7 +148,7 @@ struct CameraPreview {
 }
 let recorder = RecorderController()
 let bridge = CameraPreview(recorder: recorder, onBlackScreen: {})
-let view = bridge.makeUIView(context: 0)
+var view = bridge.makeUIView(context: 0)
 bridge.updateUIView(view, context: 0)
 recorder.captureQueue.drain()
 assert(view.previewLayer.session === recorder.session && view.frontPreviewLayer.session == nil)
@@ -156,7 +162,17 @@ for _ in 0..<100 {
     recorder.dualCaptureActive = true // simulate a delayed main-queue publication
     bridge.updateUIView(view, context: 0)
     recorder.captureQueue.drain()
-    assert(old.session.attachedLayers == 0 && recorder.session.attachedLayers == 1)
+    assert(old.session.attachedLayers == 0 && recorder.session.attachedLayers == 0)
+    assert(view.previewLayer.session == nil && view.frontPreviewLayer.session == nil)
+    recorder.uiQueue.drain()
+    let staleView = view
+    staleView.onWindowChange?()
+    view = bridge.makeUIView(context: 0)
+    bridge.updateUIView(view, context: 0)
+    CameraPreview.dismantleUIView(staleView, coordinator: recorder)
+    recorder.captureQueue.drain()
+    assert(staleView.previewLayer.session == nil && staleView.frontPreviewLayer.session == nil)
+    assert(recorder.session.attachedLayers == 1)
     assert(view.previewLayer.session === recorder.session && view.frontPreviewLayer.session == nil)
 }
 let replacement = bridge.makeUIView(context: 0)

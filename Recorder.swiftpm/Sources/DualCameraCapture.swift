@@ -287,8 +287,12 @@ final class DualCameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDel
 
     func detach() {
         // Preview layers must already be disconnected by the controller on this queue.
+        rear.setSampleBufferDelegate(nil, queue: nil)
+        front.setSampleBufferDelegate(nil, queue: nil)
+        sound.setSampleBufferDelegate(nil, queue: nil)
         if session.isRunning { session.stopRunning() }
         session.beginConfiguration()
+        for connection in session.connections { session.removeConnection(connection) }
         for output in session.outputs { session.removeOutput(output) }
         for input in session.inputs { session.removeInput(input) }
         session.commitConfiguration()

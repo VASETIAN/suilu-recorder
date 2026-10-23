@@ -108,6 +108,7 @@ final class LibraryUITests: XCTestCase {
         attach("library-delete-confirmation")
         if app.buttons["取消"].exists { app.buttons["取消"].tap() }
         else { app.navigationBars.firstMatch.coordinate(withNormalizedOffset:CGVector(dx:0.5,dy:0.5)).tap() }
+        XCTAssertFalse(app.buttons["删除 2 项"].exists)
         count(2)
         XCTAssertTrue(item(101).exists && item(103).exists && item(102).exists && item(104).exists)
         app.buttons["library-delete"].tap()

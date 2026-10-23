@@ -23,6 +23,7 @@ struct ContentView: View {
                 Color.black.ignoresSafeArea()
                 CameraPreview(recorder: recorder,
                               onBlackScreen: { setBlackScreen(true) })
+                    .id(recorder.previewGeneration)
                     .ignoresSafeArea().accessibilityHidden(isBlack || recorder.settings.interfaceMode == .browser)
                 if recorder.settings.interfaceMode == .camera {
                 LinearGradient(colors: [.black.opacity(0.4), .clear, .clear, .black.opacity(0.55)],
@@ -30,6 +31,11 @@ struct ContentView: View {
                     .ignoresSafeArea().allowsHitTesting(false)
                 VStack(spacing: landscape ? 8 : 14) {
                     header
+                    if recorder.settings.captureMode == .video {
+                        VideoFormatControls(mode: recorder.settings.mode, modes: recorder.supportedModes,
+                                            canChange: recorder.canConfigure && recorder.isReady,
+                                            select: recorder.setVideoMode)
+                    }
                     if let warning = recorder.captureLoad.warning {
                         Text(warning).font(.caption).foregroundStyle(.orange)
                             .padding(8).background(.black.opacity(0.55), in: Capsule())
@@ -134,7 +140,7 @@ struct ContentView: View {
                             Text("畅游").font(.headline)
                         }
                     }
-                    Text(recorder.settings.captureMode == .video ? recorder.settings.mode.title : recorder.settings.captureMode.title)
+                    Text(recorder.settings.captureMode == .video ? "16:9" : "4:3")
                         .font(.caption.weight(.medium)).foregroundStyle(.white.opacity(0.8)).lineLimit(1)
                     Text(recorder.activeLensLabel).font(.caption2).foregroundStyle(.white.opacity(0.65))
                     Text("剩余 \(RecorderFiles.sizeLabel(recorder.availableSpace))")
@@ -398,5 +404,45 @@ struct ContentView: View {
     private func zoomLabel(_ value: CGFloat) -> String { String(format: "%g×", Double(value)) }
     private func openSystemSettings() {
         if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+    }
+}
+
+@MainActor
+struct VideoFormatControls: View {
+    let mode: VideoMode
+    let modes: [VideoMode]
+    let canChange: Bool
+    let select: (VideoMode) -> Void
+    private var qualities: [VideoQuality] { VideoQuality.allCases.filter { value in modes.contains { $0.quality == value } } }
+    private var rates: [Int] { Array(Set(modes.filter { $0.quality == mode.quality }.map(\.fps))).sorted() }
+    private var ranges: [VideoDynamicRange] {
+        VideoDynamicRange.allCases.filter { value in
+            modes.contains { $0.quality == mode.quality && $0.fps == mode.fps && $0.dynamicRange == value }
+        }
+    }
+    var body: some View {
+        HStack(spacing: 0) {
+            Menu {
+                ForEach(qualities) { value in
+                    Button(value.title) { select(VideoMode(quality: value, fps: mode.fps, dynamicRange: mode.dynamicRange)) }
+                }
+            } label: { Text(mode.quality.title).frame(maxWidth: .infinity, minHeight: 40) }
+                .accessibilityLabel("画质").accessibilityValue(mode.quality.title).accessibilityIdentifier("capture-quality")
+            Menu {
+                ForEach(rates, id: \.self) { value in
+                    Button("\(value) fps") { select(VideoMode(quality: mode.quality, fps: value, dynamicRange: mode.dynamicRange)) }
+                }
+            } label: { Text("\(mode.fps) fps").frame(maxWidth: .infinity, minHeight: 40) }
+                .accessibilityLabel("帧率").accessibilityValue("\(mode.fps) fps").accessibilityIdentifier("capture-fps")
+            Menu {
+                ForEach(ranges) { value in
+                    Button(value.title) { select(VideoMode(quality: mode.quality, fps: mode.fps, dynamicRange: value)) }
+                }
+            } label: { Text(mode.dynamicRange.title).frame(maxWidth: .infinity, minHeight: 40) }
+                .accessibilityLabel("动态范围").accessibilityValue(mode.dynamicRange.title).accessibilityIdentifier("capture-range")
+        }
+        .font(.subheadline.weight(.semibold)).foregroundStyle(.white).tint(.white)
+        .padding(4).recorderGlass(in: Capsule(), interactive: true)
+        .disabled(!canChange || modes.isEmpty)
     }
 }
