@@ -27,7 +27,12 @@ import UIKit
         try! Self.makeFixtures()
         _recorder = StateObject(wrappedValue: RecorderController())
     }
-    var body: some Scene { WindowGroup { LibraryView(recorder:recorder) } }
+    var body: some Scene {
+        WindowGroup {
+            if CommandLine.arguments.contains("--capture-ui") { ContentView(recorder:recorder) }
+            else { LibraryView(recorder:recorder) }
+        }
+    }
     static func makeFixtures() throws {
         precondition(Bundle.main.bundleIdentifier == "com.tians.library-ui-check")
         try MediaLibrary.prepare()
@@ -76,6 +81,58 @@ final class LibraryUITests: XCTestCase {
         image.name = name; image.lifetime = .keepAlways; add(image)
     }
     func count(_ value: Int) { XCTAssertTrue(app.staticTexts["已选择 \(value) 项"].waitForExistence(timeout:5)) }
+    func checkCameraControls() {
+        let controls = [app.buttons["capture-primary"],app.buttons["相册"],app.buttons["翻转"],
+                        app.buttons["capture-options"],app.buttons["拍摄设置"],app.buttons["打开浏览模式"]]
+        for control in controls {
+            XCTAssertTrue(control.isHittable, control.description)
+            XCTAssertTrue(app.frame.contains(control.frame), control.description)
+            XCTAssertGreaterThanOrEqual(control.frame.width,44)
+            XCTAssertGreaterThanOrEqual(control.frame.height,44)
+        }
+        for i in controls.indices {
+            for j in controls.indices where j > i {
+                XCTAssertFalse(controls[i].frame.intersects(controls[j].frame), "Capture controls overlap")
+            }
+        }
+    }
+    func testCameraLayoutAndBlackScreen() {
+        continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
+        defer { XCUIDevice.shared.orientation = .portrait }
+        app.launchArguments = ["-AppleLanguages","(zh-Hans)","-AppleLocale","zh_CN","--capture-ui"]
+        app.launch()
+        XCTAssertTrue(app.buttons["capture-primary"].waitForExistence(timeout:10))
+        checkCameraControls(); attach("camera-video-portrait")
+        app.buttons["capture-quality"].tap(); app.buttons["4K"].tap()
+        XCTAssertEqual(app.buttons["capture-quality"].value as? String,"4K")
+        app.buttons["capture-mode-photo"].tap()
+        checkCameraControls(); attach("camera-photo-portrait")
+        app.buttons["capture-options"].tap()
+        XCTAssertTrue(app.buttons["开启动态照片"].waitForExistence(timeout:5))
+        app.buttons["开启动态照片"].tap()
+        app.buttons["capture-mode-video"].tap()
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let rotated = NSPredicate { _, _ in self.app.frame.width > self.app.frame.height }
+        expectation(for:rotated,evaluatedWith:app)
+        waitForExpectations(timeout:10)
+        checkCameraControls(); attach("camera-video-landscape")
+        app.terminate()
+        XCUIDevice.shared.orientation = .portrait
+        app.launchArguments += ["--recording-fixture"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["REC"].waitForExistence(timeout:10))
+        XCTAssertEqual(app.buttons["capture-primary"].label,"停止录像并保存到内置图库")
+        app.buttons["capture-options"].tap(); app.buttons["进入黑屏"].tap()
+        let black = app.buttons["黑屏录像中"]
+        XCTAssertTrue(black.waitForExistence(timeout:5))
+        XCTAssertFalse(app.buttons["capture-primary"].isHittable)
+        attach("camera-black-recording")
+        black.doubleTap()
+        XCTAssertTrue(app.buttons["capture-primary"].waitForExistence(timeout:5))
+        XCTAssertTrue(app.staticTexts["REC"].exists)
+        attach("camera-recording-restored")
+    }
     func testLongPressMultiSelectExportAndDelete() {
         continueAfterFailure = false
         app.launchArguments = ["-AppleLanguages","(zh-Hans)","-AppleLocale","zh_CN"]
@@ -108,6 +165,7 @@ final class LibraryUITests: XCTestCase {
         attach("library-delete-confirmation")
         if app.buttons["取消"].exists { app.buttons["取消"].tap() }
         else { app.navigationBars.firstMatch.coordinate(withNormalizedOffset:CGVector(dx:0.5,dy:0.5)).tap() }
+        XCTAssertFalse(app.buttons["删除 2 项"].exists)
         count(2)
         XCTAssertTrue(item(101).exists && item(103).exists && item(102).exists && item(104).exists)
         app.buttons["library-delete"].tap()
@@ -127,6 +185,29 @@ def run(device):
     UI_OUT.mkdir(parents=True, exist_ok=True)
     (OUT / 'LibraryFixtureApp.swift').write_text(app_source)
     (OUT / 'LibraryUITests.swift').write_text(test_source)
+    controller = (ROOT/'Recorder.swiftpm/Sources/RecorderController.swift').read_text()
+    fixture_init = r'''
+        if CommandLine.arguments.contains("--capture-ui") {
+            precondition(Bundle.main.bundleIdentifier == "com.tians.library-ui-check")
+            settings = RecorderSettings(); settings.includeLocation = false
+            captureSettings = settings; mainForeground = true; foreground = true; isReady = true
+            hasTorch = true; livePhotoSupported = true; activeLensLabel = "后置主摄"
+            zoomStops = [0.5,1,2,4,8]; availableSpace = 128 * 1_073_741_824; status = "准备录像"
+            supportedModes = [VideoMode(quality:.hd1080,fps:30),VideoMode(quality:.uhd4K,fps:30),
+                              VideoMode(quality:.uhd4K,fps:60),VideoMode(quality:.uhd4K,fps:60,dynamicRange:.hdr)]
+            singleCaptureModes = supportedModes
+            if CommandLine.arguments.contains("--recording-fixture") { phase = .recording; capturePhase = .recording; elapsed = 12 }
+            return
+        }
+'''
+    assert controller.count('        super.init()') == 1
+    controller = controller.replace('        super.init()', '        super.init()'+fixture_init,1)
+    apply = '    func apply(_ value: RecorderSettings, displayedZoom: CGFloat? = nil) {'
+    assert controller.count(apply) == 1
+    controller = controller.replace(apply, apply+'''
+        if CommandLine.arguments.contains("--capture-ui") { settings = value; captureSettings = value; return }
+''',1)
+    (OUT/'CameraFixtureController.swift').write_text(controller)
     generate()
     project = ROOT / 'Recorder.xcodeproj'
     pbx = project / 'project.pbxproj'
@@ -134,6 +215,7 @@ def run(device):
     objects = data['objects']
     app_target = identifier('target')
     objects[identifier('source:RecorderApp.swift')].update(path=str(OUT/'LibraryFixtureApp.swift'),sourceTree='<absolute>')
+    objects[identifier('source:RecorderController.swift')].update(path=str(OUT/'CameraFixtureController.swift'),sourceTree='<absolute>')
     objects[app_target]['buildPhases'].remove(identifier('embed-controls'))
     objects[app_target]['dependencies'] = []
     for name in ['Debug','Release']:
@@ -206,6 +288,10 @@ def run(device):
         'fixture_app_id':APP_ID,'physical_device_test':False,'native_ui_test':'passed',
         'workflow':'tap detail; long press selects without opening; multi-select/toggle; filter clears; select all; export menu; cancel/confirm bulk delete',
         'synthetic_items_deleted':sorted(deleted),'unselected_originals_unchanged':True},indent=2))
+    (UI_OUT/'camera-verification.json').write_text(json.dumps({'production_content_view':True,
+        'capture_engine':'synthetic ready/recording states in separate fixture app; no camera opened',
+        'native_ui_test':'passed','physical_device_test':False,
+        'workflow':'portrait and landscape non-overlapping 44pt controls; quality selection; photo/video and Live Photo selection; recording black screen and double-tap restore'},indent=2))
     print('PASS: actual native gallery long-press/tap selection, filtered select-all, export menu, cancelled and confirmed bulk deletion; paired Live Photo removed and unselected original hashes unchanged')
 
 

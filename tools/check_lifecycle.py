@@ -41,6 +41,10 @@ def build(controller: Path, output: Path):
         'private func setPhase(', 'private func stopOnQueue(',
         'private func handleRuntimeErrorOnQueue(', 'private func handleSessionInterruptionOnQueue(', 'private func completeCaptureOnQueue(',
         'private func requestResumeOnQueue(', 'private func updateCaptureLoadOnQueue(')]
+    methods += [extract(source, 'private func configureHapticsOnQueue()'),
+                extract(source, 'private func captureFeedback('),
+                extract(source, 'func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo')
+                .replace('AVCaptureFileOutput', 'ReplayMovie').replace('[AVCaptureConnection]', '[String]')]
     if 'private func resumeSessionOnQueue()' in source:
         methods.append(extract(source, 'private func resumeSessionOnQueue()'))
     else:
@@ -73,7 +77,8 @@ final class ReplaySession {
     var isMultitaskingCameraAccessSupported = false
     var isMultitaskingCameraAccessEnabled = false
     var starts = 0
-    func startRunning() { starts += 1; isRunning = !isInterrupted }
+    var hapticsWhenStarted = false
+    func startRunning() { starts += 1; hapticsWhenStarted = AVAudioSession.sharedInstance().allowed; isRunning = !isInterrupted }
     func stopRunning() { isRunning = false }
 }
 typealias AVCaptureSession = ReplaySession
@@ -83,6 +88,7 @@ struct FakeSettings: Equatable {
     var reserveBytes: Int64 = 512
     var resumeAfterBackground = false, automaticallyExportToPhotos = false, thermalProtection = true, includeLocation = true
     var interfaceMode: RecorderInterface = .camera
+    var hapticFeedback = true
     func save() {}
 }
 struct MediaItem { var id = UUID(); var kind = "video" }
@@ -93,6 +99,25 @@ enum MediaLibrary {
     }
 }
 struct FakeInput { var device = "后置主摄" }
+final class AVAudioSession {
+    static let shared = AVAudioSession()
+    var allowed = false, fails = false
+    static func sharedInstance() -> AVAudioSession { shared }
+    func setAllowHapticsAndSystemSoundsDuringRecording(_ value: Bool) throws {
+        if fails { throw NSError(domain:"Haptics",code:1) }
+        allowed = value
+    }
+}
+var feedbackEvents: [String] = []
+struct UIImpactFeedbackGenerator {
+    enum Style: String { case medium, light }
+    let style: Style
+    func impactOccurred() { feedbackEvents.append(style.rawValue) }
+}
+struct UINotificationFeedbackGenerator {
+    enum FeedbackType { case success }
+    func notificationOccurred(_ value: FeedbackType) { feedbackEvents.append("saved") }
+}
 let AVFoundationErrorDomain = "AVFoundationErrorDomain"
 enum AVError { enum Code: Int { case mediaServicesWereReset = -11819 } }
 func CMTimeGetSeconds(_ value: Double) -> Double { value }
@@ -173,7 +198,8 @@ final class Recorder: @unchecked Sendable {
     func turnTorchOff() {}
     func publishCapabilities() {}
     enum CaptureFeedback { case began, stopped, saved }
-    func captureFeedback(_ value: CaptureFeedback) {}
+    func sendFeedback(_ value: CaptureFeedback) { captureFeedback(value) }
+    func configureAudioFeedback() { configureHapticsOnQueue() }
     func createThumbnail(_ item: MediaItem) {}
     func exportToPhotos(_ items: [MediaItem], automatic: Bool) {}
     func refreshLibraryOnQueue() {}
@@ -529,6 +555,33 @@ let blockedStart = ReplaySettingsView()
 blockedStart.recorder.isReady = false; blockedStart.begin()
 assert(!blockedStart.pendingBrowserStart && blockedStart.recorder.browserStarts.isEmpty)
 print("PASS: settings start waits for applied video/active camera, starts once, dismisses only after recording, cancels error/background/close and never retries a failed start")
+feedbackEvents = []
+let tactile = Recorder()
+tactile.mainForeground = false; tactile.session.isRunning = false
+tactile.sceneChanged(.active); tactile.pump()
+assert(AVAudioSession.sharedInstance().allowed && tactile.session.hapticsWhenStarted,
+       "The audio session must allow haptics before capture restarts")
+feedbackEvents = []
+tactile.fileOutput(tactile.movieOutput, didStartRecordingTo: URL(fileURLWithPath:"/fixture.mov"), from:[])
+assert(feedbackEvents.isEmpty, "A tap/preparing state must not announce recording success")
+tactile.pump()
+assert(tactile.phase == .recording && feedbackEvents == ["medium"])
+tactile.sendFeedback(.stopped); tactile.sendFeedback(.saved)
+assert(feedbackEvents == ["medium","light","saved"])
+tactile.captureSettings.hapticFeedback = false; tactile.configureAudioFeedback()
+feedbackEvents = []; tactile.sendFeedback(.began)
+assert(!AVAudioSession.sharedInstance().allowed && feedbackEvents.isEmpty)
+for interrupted in ["stopped","background"] {
+    let cancelled = Recorder()
+    cancelled.stopRequested = interrupted == "stopped"; cancelled.foreground = interrupted != "background"
+    cancelled.fileOutput(cancelled.movieOutput, didStartRecordingTo:URL(fileURLWithPath:"/cancelled.mov"), from:[])
+    cancelled.pump()
+    assert(cancelled.phase == .finishing && feedbackEvents.isEmpty)
+}
+AVAudioSession.sharedInstance().fails = true
+tactile.configureAudioFeedback()
+AVAudioSession.sharedInstance().fails = false
+print("PASS: audio input allows haptics before restart; recording callback confirms once; stopped/background starts stay silent; feedback preference and nonfatal audio-option errors are respected")
 print("Replay uses fake session and queues; AVKit, Apple SDK and physical device behavior are not tested.")
 '''.replace('METHODS', '\n'.join(methods)).replace('SINGLE_SESSION', session_declaration(source)).replace('DUAL_SESSION', session_declaration(dual)).replace('VIEW_METHOD', extract(view, 'private func restoreOrResumeCapture()')).replace('SNAPSHOT_METHOD', extract(view, 'private func rememberBlackBeforeLeaving()')).replace('LAUNCH_METHOD', extract(view, 'private func handleCameraLaunchRequest()')).replace('BROWSER_BEGIN', extract(settings_view, 'private func startBrowsingRecording()')).replace('BROWSER_CONTINUE', extract(settings_view, 'private func continueBrowsingStart()'))
     output.parent.mkdir(parents=True, exist_ok=True)
